@@ -13,6 +13,13 @@
 # testing
 /coverage
 
+# local SQLite / D1 runtime data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
 # next.js
 /.next/
 /out/

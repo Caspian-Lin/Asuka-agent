@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://purr.local/schemas/phase1-evaluation.schema.json",
+  "$id": "https://asuka-agent.local/schemas/phase1-evaluation.schema.json",
   "title": "Phase 1 Memory Evaluation Suite",
   "type": "object",
   "additionalProperties": false,

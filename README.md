@@ -1,85 +1,65 @@
-# Purr Memory Lab
+# Asuka Agent
 
-一个可运行、可追溯、可评测的持续型聊天 Agent 第一阶段 MVP。
+一个可运行、可追溯、可评测，并能接入 IM Channel 的持续型聊天 Agent。
 
-它优先验证长期 Agent 最容易被忽略的闭环：原始事件 → 记忆召回 → 候选记忆 → Shadow 思绪 → 人工标签 → 回归评测。第一阶段不会自主向外部通道发消息，也不依赖任何模型 API key。
+当前实现包含两条明确的数据链路：Web 认知实验使用 Cloudflare D1；NapCat QQ 入站、Channel、未读消息和定时任务控制面使用本机 PostgreSQL。QQ 内容不会直接触发外部发送，所有允许的消息必须先进入本地不可变接收箱。
 
 ## 已实现
 
-- 单用户 Web 对话与持久化历史；
-- correlation id 串联的事件日志；
-- 偏好、目标、明确记忆和未来事项候选抽取；
-- 候选接受/拒绝、有效记忆归档；
-- 带低相关拒绝的可解释记忆检索；
-- 结构化 Shadow 思绪及 `应发送/稍后/静默` 标签；
-- 固定的偏好召回、目标召回、未知信息拒答评测；
-- Shadow Mode、安静时段、每日主动预算设置；
-- Cloudflare D1 + Drizzle 持久化；
-- 响应式中文研究看板。
+- Web 对话、事件日志、候选记忆、Shadow 思绪和固定评测；
+- NapCat OneBot 11 正向 WebSocket 接入；
+- 仅保存 `.env` 白名单内的 QQ 群和私聊联系人消息，自身消息被拒绝；
+- PostgreSQL 幂等接收箱、持续消息投影和逐条未读状态；
+- IM Channel、群会话历史和定时任务可视化页面；
+- Drizzle PostgreSQL schema、版本化 migration 与一致性检查。
 
 ## 快速开始
 
-要求 Node.js `>=22.13.0`。
+要求 Node.js `>=22.13.0`、PostgreSQL 和已登录的 NapCat。
 
 ```bash
-npm install
-npm run dev
+cp .env.example .env
+make install
+make db-migrate
+make dev
 ```
 
-浏览器打开终端显示的本地地址。首次请求会创建 D1 表并注入可复现的演示数据。
+NapCat 正向 WebSocket 默认监听 `127.0.0.1:3001`。在 `.env` 中设置相同 Token，并用逗号填写允许保存的群号：
 
-推荐演示路径：
+```dotenv
+NAPCAT_GROUP_WHITELIST=123456789,987654321
+NAPCAT_PRIVATE_USER_WHITELIST=1122334455
+```
 
-1. 在对话输入“我喜欢浅色、可视化的界面”；
-2. 到“记忆”接受刚生成的候选；
-3. 到“思绪”标注这轮主动意图；
-4. 到“评测”运行 `phase1-memory-smoke`；
-5. 刷新页面确认消息、标签与评测结果仍然存在。
+两个白名单都为空表示不保存任何 QQ 消息。Web 默认运行在 `3000`，本地 PostgreSQL 控制 API 运行在 `3002`。
 
-## 质量检查
+## 常用命令
 
 ```bash
-npm run lint
-npm run test:unit
-npm run db:generate
-npm test
+make dev          # Web + gateway + control API + 持续 worker
+make frontend     # 仅 Web
+make backend      # 仅三个后端进程
+make worker       # 手动处理一批入站消息
+make db-generate  # 生成 migration，必须审阅 SQL
+make db-migrate   # 应用已审阅 migration
+make check        # ESLint + 单元测试
+make test         # 构建 + 完整测试
 ```
-
-`npm test` 会先构建站点，再运行领域单测与产物渲染测试。
 
 ## 主要目录
 
 ```text
-app/api/                  HTTP command/query routes
-app/components/           Agent 控制台
-db/schema.ts              14 张领域表
-db/runtime.ts             D1 运行时建表
-drizzle/                  版本化 SQL migration
-lib/agent-core.ts         检索、抽取、思绪和回复纯函数
-lib/server/agent-service.ts 领域编排与持久化
-docs/                     需求、开发设计和机器可读评测 schema
-tests/                    单元与渲染测试
+app/                    Web UI 与 D1 Route Handlers
+db/postgres/            PostgreSQL Drizzle schema
+drizzle-pg/             PostgreSQL migrations
+services/               NapCat gateway、worker、control API
+lib/                    Agent 与入站纯函数
+tests/                  Node 测试
+docs/                   核心需求、设计与接入文档
 ```
 
-## 文档
+核心参考是 [`docs/requirements-and-development.md`](docs/requirements-and-development.md)，NapCat 配置和排错见 [`docs/qq-ingress.md`](docs/qq-ingress.md)。
 
-- [完整需求与开发设计](docs/requirements-and-development.md)
-- [评测 JSON Schema](docs/schemas/phase1-evaluation.schema.json)
-- [第一阶段评测 seed](docs/schemas/phase1-evaluation-seed.json)
+## 安全边界
 
-## API
-
-| 方法 | 路径 | 作用 |
-|---|---|---|
-| GET | `/api/bootstrap` | 获取完整实验快照 |
-| POST | `/api/messages` | 执行一轮对话/记忆/思绪流水线 |
-| PATCH | `/api/memories` | 接受、拒绝或归档记忆 |
-| PATCH | `/api/thoughts` | 标注主动思绪 |
-| POST | `/api/evaluations` | 运行固定回归集 |
-| PATCH | `/api/settings` | 保存策略设置 |
-| POST | `/api/reset` | 恢复演示数据 |
-
-## MVP 边界
-
-当前回复与抽取由确定性 adapter 生成，目的是把系统接口、数据质量和模型能力分开测量。生产演进建议使用 PostgreSQL/pgvector、正式 migration、事件 outbox、混合检索、IM gateway、job worker 和受能力令牌约束的 tool runner；具体阶段和进入条件见完整设计文档。
-
+当前 QQ 通道只接收白名单群和联系人消息，不主动外发。图片、语音和文件保留在接收箱原始 payload 中，但暂不投影到 Agent 会话。规划中的记忆整理和回归任务只展示定义，在正式执行器、lease、重试与回滚策略完成前不会启用。

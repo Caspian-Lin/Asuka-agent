@@ -1,9 +1,12 @@
-# 持续型聊天 Agent：需求与开发设计文档
+# Asuka Agent：需求与开发设计文档
 
-> 文档版本：0.1.0（Phase 1 MVP）  
-> 更新时间：2026-07-14  
-> 状态：第一阶段已实现，可运行、可审查、可评测  
-> 配套实现：`Persistent Chat Agent MVP / Purr Memory Lab`
+> 文档版本：0.2.0（Phase 2 IM/调度控制面首个切片）
+>
+> 更新时间：2026-07-15
+>
+> 状态：第一阶段已实现；NapCat QQ 入站、IM Channel 与任务控制面已进入本地验证
+>
+> 配套实现：`Asuka Agent`
 
 ## 1. 文档目的
 
@@ -138,7 +141,7 @@ flowchart TD
 |---|---|---|---|
 | Phase 1（当前） | 建立可审查数据与评测闭环 | Web 对话、事件日志、候选/有效记忆、Shadow 思绪、人工标签、固定评测、设置 | 无外部工具、无主动外发 |
 | Phase 1.5 | 接入真实模型与混合检索 | LLM adapter、embedding/BM25、时间过滤、模型/提示词版本化、离线回放 | 仍为 Shadow |
-| Phase 2 | 接入 IM、调度器和只读工具 | Purr/Telegram/Slack adapter、任务队列、归档整理、RSS/blog/搜索只读工具 | 只读自动；写操作审批 |
+| Phase 2 | 接入 IM、调度器和只读工具 | NapCat QQ/Telegram/Slack adapter、任务队列、归档整理、RSS/blog/搜索只读工具 | 只读自动；写操作审批 |
 | Phase 3 | 小分类器与受限主动发言 | 发送策略模型、校准阈值、A/B、预算、撤回、用户反馈 | 低风险、小预算外发 |
 | Phase 4 | 工具市场、子 Agent、长期学习 | 签名工具包、能力令牌、沙箱、子 Agent、procedural memory | 按域逐项授权 |
 
@@ -274,15 +277,19 @@ sequenceDiagram
 ```text
 app/
   api/                    HTTP API
-  components/             客户端控制台
+  components/             客户端控制台、IM Channel 与任务页面
   globals.css             设计系统与响应式布局
 db/
   schema.ts               Drizzle 领域 schema
+  postgres/schema.ts      PostgreSQL IM 与调度 schema
   runtime.ts              D1 首次运行建表
 drizzle/                  版本化 SQL migration
+drizzle-pg/               PostgreSQL 版本化 SQL migration
 lib/
   agent-core.ts           纯函数：token、检索、候选、思绪、回复
+  napcat-ingress.mjs      QQ 群白名单与事件标准化纯函数
   server/agent-service.ts  事务编排与持久化
+services/                 NapCat gateway、持续 worker、控制 API
 docs/
   requirements-and-development.md
   schemas/                可机读 schema 与 seed
@@ -450,7 +457,7 @@ related_to       弱关联
 
 机器可读定义见 `docs/schemas/phase1-evaluation.schema.json` 与 `docs/schemas/phase1-evaluation-seed.json`。
 
-### 8.7 Phase 2 需要补充的数据表
+### 8.7 Phase 2 数据表与当前进度
 
 ```text
 jobs                 定时任务定义
@@ -465,6 +472,8 @@ outbound_deliveries  平台 message id、状态、撤回信息
 agent_runs           父/子 Agent 运行树、预算、状态
 ```
 
+当前已通过 PostgreSQL migration 实现 `channels`、`inbound_deliveries`、`jobs`、`job_runs`，并在 `messages` 增加逐条 `read_at`。`outbound_*`、工具和子 Agent 表仍未开放。IM 会话通过正式 `channel_id` 外键归属 Channel；禁止解析拼接 ID 代替关系。
+
 ## 9. API 设计
 
 所有成功接口返回完整 `Snapshot`，便于 MVP UI 保持简单；生产规模增长后改为 command response + 增量 query。
@@ -478,6 +487,15 @@ agent_runs           父/子 Agent 运行树、预算、状态
 | POST | `/api/evaluations` | — | 运行固定 suite |
 | PATCH | `/api/settings` | 策略字段 | 更新 Shadow、安静时段和预算 |
 | POST | `/api/reset` | — | 仅演示环境恢复 seed |
+
+本地 PostgreSQL 控制 API 默认监听 `127.0.0.1:3002`：
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| GET | `/health` | 控制 API 与 PostgreSQL 健康检查 |
+| GET | `/api/im` | 查询 Channel、群会话、历史消息和未读数 |
+| POST | `/api/im/read` | 将指定会话的入站用户消息标为已读 |
+| GET | `/api/jobs` | 查询系统托管任务、规划任务和最近运行 |
 
 错误响应：
 
@@ -647,6 +665,10 @@ last_success_at / next_run_at
 - consolidation 产生 diff，必须可回滚；
 - 相对日期在整理时转换为绝对时间，同时保留原文证据。
 
+### 12.4 当前任务控制面
+
+已登记两个不可配置的系统任务：NapCat WebSocket 事件接收、每 5 秒入站投影。后者以 `FOR UPDATE SKIP LOCKED` 领取消息，并把有实际处理量或失败的运行写入 `job_runs`。夜间记忆整理和定时回归评测以 `planned + configurable` 展示；在 lease、重试、dead letter 与回滚实现前保持禁用，页面不得暗示它们已在执行。
+
 ## 13. 工具、权限与子 Agent
 
 ### 13.1 工具分类
@@ -704,7 +726,7 @@ interface ChannelAdapter {
 
 ```json
 {
-  "channel": "purr",
+  "channel": "napcat",
   "channelAccountId": "account-id",
   "externalConversationId": "thread-id",
   "externalMessageId": "message-id",
@@ -729,6 +751,10 @@ interface ChannelAdapter {
 - 先摘要成候选 observation，再由兴趣/新颖度策略决定是否生成 thought；
 - 来源、发布时间、抓取时间和链接必须保留；
 - 同一主题去重，避免反复主动发言。
+
+### 14.3 NapCat QQ 当前实现
+
+NapCat 作为 OneBot 11 正向 WebSocket 服务端监听 `127.0.0.1:3001`，Asuka gateway 主动连接。`NAPCAT_GROUP_WHITELIST` 是逗号分隔群号集合，`NAPCAT_PRIVATE_USER_WHITELIST` 是允许私聊的 QQ 号集合；两者都为空表示拒绝所有消息。当前接收白名单 `message.group` 与 `message.private`，拒绝自身和非白名单消息。允许消息先原样写入 PostgreSQL `inbound_deliveries`，随后由持续 worker 投影为会话、消息与事件；WebSocket 回调不直接调用 Agent。Channel 页面显示网关心跳、会话、历史和未读状态。完整配置见 `docs/qq-ingress.md`。
 
 ## 15. 安全、隐私与治理
 
@@ -806,16 +832,20 @@ interface ChannelAdapter {
 ### 17.2 本地命令
 
 ```bash
-npm install
-npm run dev
+make install
+make db-migrate
+make dev
 ```
+
+`make dev` 并行启动 Web（3000）、NapCat gateway、PostgreSQL control API（3002）和持续入站 worker。单独排错可使用 `make frontend`、`make backend`、`make gateway`、`make control-api` 与 `make worker`。
 
 质量检查：
 
 ```bash
-npm run lint
-npm run db:generate
-npm test
+make lint
+make db-generate
+make db-check
+make test
 ```
 
 `db:generate` 在修改 `db/schema.ts` 后执行，并检查生成的 SQL 是否只包含预期变更。
@@ -902,9 +932,9 @@ outbound_duplicate_prevented
 | 外部内容注入 | Phase 1 无外部抓取 | taint、白名单、最小权限、安全回归 |
 | 评测样本太少 | 明确标记 smoke suite | 引入错误回归集与公开 benchmark |
 
-## 21. 下一阶段进入条件
+## 21. 后续高权限能力进入条件
 
-满足以下条件才开放 Phase 2：
+当前只提前开放低风险、只入站的 IM 与调度控制面。主动外发、工具和自动记忆整理仍需满足以下条件：
 
 - 记忆抽取人工 precision ≥ 90%；
 - 固定召回/拒答集持续通过；
@@ -928,4 +958,3 @@ outbound_duplicate_prevented
 8. 小分类器可行，但先用 Shadow Mode 采集高质量三分类标签；
 9. 调度器只触发 job，发送与工具副作用必须经过独立策略门；
 10. 子 Agent 不能扩权，外部内容不能变成控制指令。
-

@@ -8,6 +8,20 @@
       "when": 1784034099054,
       "tag": "0000_initial_agent_and_qq_ingress",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784051328251,
+      "tag": "0001_im_channels_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784052660507,
+      "tag": "0002_channel_conversation_presence",
+      "breakpoints": true
     }
   ]
 }

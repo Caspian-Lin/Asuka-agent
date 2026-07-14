@@ -1,4 +1,6 @@
+import { sql } from "drizzle-orm";
 import {
+  boolean,
   index,
   integer,
   jsonb,
@@ -9,20 +11,28 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
-/**
- * The channel ingress tables are the authoritative boundary for external IM.
- * Raw payloads are retained for audit; only supported content is projected to
- * the agent message stream by a later consumer.
- */
+export const agents = pgTable("agents", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  description: text("description").notNull(),
+  mode: text("mode").notNull().default("shadow"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+});
+
+/** Authoritative boundary for external IM accounts and deliveries. */
 export const channels = pgTable(
   "channels",
   {
     id: text("id").primaryKey(),
-    agentId: text("agent_id").notNull(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id),
     provider: text("provider").notNull(),
     accountId: text("account_id").notNull(),
-    enabled: integer("enabled").notNull().default(1),
+    enabled: boolean("enabled").notNull().default(true),
     cursor: text("cursor"),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
     config: jsonb("config").notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
@@ -35,11 +45,86 @@ export const channels = pgTable(
   ],
 );
 
+export const conversations = pgTable(
+  "conversations",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id),
+    channel: text("channel").notNull().default("web"),
+    channelId: text("channel_id").references(() => channels.id, {
+      onDelete: "set null",
+    }),
+    externalId: text("external_id"),
+    title: text("title").notNull(),
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    index("conversations_agent_idx").on(table.agentId),
+    index("conversations_channel_time_idx").on(table.channelId, table.updatedAt),
+    uniqueIndex("conversations_agent_channel_external_uidx")
+      .on(table.agentId, table.channel, table.externalId)
+      .where(sql`${table.externalId} is not null`),
+  ],
+);
+
+export const messages = pgTable(
+  "messages",
+  {
+    id: text("id").primaryKey(),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    content: text("content").notNull(),
+    citationsJson: jsonb("citations_json").notNull().default([]),
+    correlationId: text("correlation_id").notNull(),
+    readAt: timestamp("read_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    index("messages_conversation_time_idx").on(
+      table.conversationId,
+      table.createdAt,
+    ),
+    index("messages_unread_idx")
+      .on(table.conversationId, table.createdAt)
+      .where(sql`${table.role} = 'user' and ${table.readAt} is null`),
+  ],
+);
+
+export const events = pgTable(
+  "events",
+  {
+    id: text("id").primaryKey(),
+    conversationId: text("conversation_id").references(() => conversations.id, {
+      onDelete: "cascade",
+    }),
+    eventType: text("event_type").notNull(),
+    sourceType: text("source_type").notNull(),
+    payloadJson: jsonb("payload_json").notNull().default({}),
+    correlationId: text("correlation_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    index("events_conversation_time_idx").on(
+      table.conversationId,
+      table.createdAt,
+    ),
+    index("events_type_idx").on(table.eventType),
+  ],
+);
+
 export const inboundDeliveries = pgTable(
   "inbound_deliveries",
   {
     id: text("id").primaryKey(),
-    channelId: text("channel_id").notNull(),
+    channelId: text("channel_id")
+      .notNull()
+      .references(() => channels.id, { onDelete: "cascade" }),
     externalConversationId: text("external_conversation_id").notNull(),
     externalMessageId: text("external_message_id").notNull(),
     senderId: text("sender_id").notNull(),
@@ -67,8 +152,60 @@ export const inboundDeliveries = pgTable(
 export const inboundDeliveryLabels = pgTable(
   "inbound_delivery_labels",
   {
-    deliveryId: text("delivery_id").notNull(),
+    deliveryId: text("delivery_id")
+      .notNull()
+      .references(() => inboundDeliveries.id, { onDelete: "cascade" }),
     label: text("label").notNull(),
   },
   (table) => [primaryKey({ columns: [table.deliveryId, table.label] })],
+);
+
+export const jobs = pgTable(
+  "jobs",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id),
+    jobType: text("job_type").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    scheduleType: text("schedule_type").notNull(),
+    scheduleExpression: text("schedule_expression").notNull(),
+    timezone: text("timezone").notNull().default("Asia/Shanghai"),
+    configurable: boolean("configurable").notNull().default(false),
+    enabled: boolean("enabled").notNull().default(false),
+    status: text("status").notNull().default("planned"),
+    config: jsonb("config").notNull().default({}),
+    lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+    nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("jobs_agent_type_uidx").on(table.agentId, table.jobType),
+    index("jobs_status_idx").on(table.status, table.enabled),
+  ],
+);
+
+export const jobRuns = pgTable(
+  "job_runs",
+  {
+    id: text("id").primaryKey(),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    status: text("status").notNull(),
+    triggerType: text("trigger_type").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    metrics: jsonb("metrics").notNull().default({}),
+  },
+  (table) => [
+    uniqueIndex("job_runs_idempotency_uidx").on(table.idempotencyKey),
+    index("job_runs_job_time_idx").on(table.jobId, table.startedAt),
+  ],
 );

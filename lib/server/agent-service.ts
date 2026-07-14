@@ -20,7 +20,7 @@ import {
   rankMemories,
 } from "@/lib/agent-core";
 
-const AGENT_ID = "agent-purr";
+const AGENT_ID = "agent-asuka";
 const CONVERSATION_ID = "conversation-main";
 const SUITE_ID = "phase1-memory-smoke";
 
@@ -44,24 +44,17 @@ function safeJson<T>(value: string, fallback: T): T {
 
 export async function ensureSeedData() {
   const db = await ensureSchema();
-  const existing = await db
-    .select({ id: agents.id })
-    .from(agents)
-    .where(eq(agents.id, AGENT_ID))
-    .limit(1);
-  if (existing.length > 0) return db;
-
   const now = nowIso();
   const correlationId = "seed-phase1";
 
   await db.insert(agents).values({
     id: AGENT_ID,
-    name: "Purr",
+    name: "Asuka Agent",
     description: "一个可追溯、可评测的长期聊天 Agent MVP",
     mode: "shadow",
     createdAt: now,
     updatedAt: now,
-  });
+  }).onConflictDoNothing();
   await db.insert(conversations).values({
     id: CONVERSATION_ID,
     agentId: AGENT_ID,
@@ -70,7 +63,7 @@ export async function ensureSeedData() {
     status: "active",
     createdAt: now,
     updatedAt: now,
-  });
+  }).onConflictDoNothing();
   await db.insert(agentSettings).values({
     agentId: AGENT_ID,
     shadowMode: true,
@@ -79,7 +72,7 @@ export async function ensureSeedData() {
     dailyProactiveBudget: 3,
     modelMode: "deterministic_mvp",
     updatedAt: now,
-  });
+  }).onConflictDoNothing();
 
   await db.insert(messages).values([
     {
@@ -102,7 +95,7 @@ export async function ensureSeedData() {
       correlationId,
       createdAt: addHours(now, 0.001),
     },
-  ]);
+  ]).onConflictDoNothing();
 
   await db.insert(events).values([
     {
@@ -126,7 +119,7 @@ export async function ensureSeedData() {
       correlationId,
       createdAt: addHours(now, 0.0005),
     },
-  ]);
+  ]).onConflictDoNothing();
 
   await db.insert(memories).values([
     {
@@ -170,7 +163,7 @@ export async function ensureSeedData() {
       createdAt: now,
       updatedAt: now,
     },
-  ]);
+  ]).onConflictDoNothing();
 
   await db.insert(memoryEvidence).values([
     {
@@ -183,7 +176,7 @@ export async function ensureSeedData() {
       eventId: "event-seed-message",
       evidenceRole: "supports",
     },
-  ]);
+  ]).onConflictDoNothing();
 
   await db.insert(thoughts).values({
     id: "thought-seed",
@@ -200,7 +193,7 @@ export async function ensureSeedData() {
     expiresAt: addHours(now, 12),
     createdAt: now,
     updatedAt: now,
-  });
+  }).onConflictDoNothing();
 
   await db.insert(evaluationCases).values([
     {
@@ -230,7 +223,7 @@ export async function ensureSeedData() {
       tagsJson: JSON.stringify(["unknown", "abstention"]),
       createdAt: now,
     },
-  ]);
+  ]).onConflictDoNothing();
 
   return db;
 }

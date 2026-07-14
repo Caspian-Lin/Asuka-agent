@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Purr Memory Lab · Persistent Agent MVP",
-  description: "可追溯、可评测的长期聊天 Agent 第一阶段 MVP。",
+  title: "Asuka Agent",
+  description: "可追溯、可评测、支持 IM Channel 的持续型聊天 Agent。",
   other: {
     "codex-preview": "development",
   },

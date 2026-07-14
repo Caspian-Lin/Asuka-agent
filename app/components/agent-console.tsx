@@ -7,8 +7,17 @@ import {
   useRef,
   useState,
 } from "react";
+import ImChannelPage from "@/app/components/im-channel-page";
+import JobsPage from "@/app/components/jobs-page";
 
-type ViewKey = "chat" | "thoughts" | "memories" | "evaluation" | "settings";
+type ViewKey =
+  | "chat"
+  | "channels"
+  | "thoughts"
+  | "memories"
+  | "jobs"
+  | "evaluation"
+  | "settings";
 
 type Message = {
   id: string;
@@ -109,8 +118,10 @@ type Snapshot = {
 
 const navItems: Array<{ key: ViewKey; label: string; glyph: string }> = [
   { key: "chat", label: "对话", glyph: "⌁" },
+  { key: "channels", label: "IM Channel", glyph: "◎" },
   { key: "thoughts", label: "思绪", glyph: "◌" },
   { key: "memories", label: "记忆", glyph: "◇" },
+  { key: "jobs", label: "定时任务", glyph: "◷" },
   { key: "evaluation", label: "评测", glyph: "↗" },
   { key: "settings", label: "设置", glyph: "⊙" },
 ];
@@ -307,7 +318,7 @@ export default function AgentConsole() {
     return (
       <main className="loading-screen">
         <div className="loading-cat"><span>⌒</span><i /></div>
-        <p>{error ? `载入失败：${error}` : "正在唤醒 Purr 的记忆…"}</p>
+        <p>{error ? `载入失败：${error}` : "正在载入 Asuka Agent…"}</p>
         {error && <button onClick={() => window.location.reload()}>重新载入</button>}
       </main>
     );
@@ -324,8 +335,8 @@ export default function AgentConsole() {
     <main className="agent-shell">
       <aside className="side-rail">
         <button className="brand" onClick={() => setActiveView("chat")} aria-label="返回对话">
-          <span className="brand-mark"><i /><b>p</b></span>
-          <span><strong>Purr</strong><small>Memory Lab</small></span>
+          <span className="brand-mark"><i /><b>A</b></span>
+          <span><strong>Asuka</strong><small>Agent</small></span>
         </button>
 
         <nav className="primary-nav" aria-label="主要导航">
@@ -353,7 +364,7 @@ export default function AgentConsole() {
 
       <section className="workbench">
         <header className="top-bar">
-          <div className="mobile-brand"><span className="brand-mark"><i /><b>p</b></span><strong>Purr</strong></div>
+          <div className="mobile-brand"><span className="brand-mark"><i /><b>A</b></span><strong>Asuka</strong></div>
           <div className="top-context">
             <span className="eyebrow">{snapshot.conversation.channel} channel</span>
             <strong>{snapshot.conversation.title}</strong>
@@ -383,7 +394,7 @@ export default function AgentConsole() {
                 <div className="day-divider"><span>第一阶段 · 可审查运行</span></div>
                 {snapshot.messages.map((message) => (
                   <article key={message.id} className={`message ${message.role}`}>
-                    {message.role === "assistant" && <span className="avatar agent-avatar">p</span>}
+                    {message.role === "assistant" && <span className="avatar agent-avatar">A</span>}
                     <div className="message-body">
                       <div className="message-meta">
                         <strong>{message.role === "assistant" ? snapshot.agent.name : "你"}</strong>
@@ -423,7 +434,7 @@ export default function AgentConsole() {
                         event.currentTarget.form?.requestSubmit();
                       }
                     }}
-                    placeholder="告诉 Purr 一个偏好、目标，或问它记得什么…"
+                    placeholder="告诉 Asuka Agent 一个偏好、目标，或问它记得什么…"
                     rows={2}
                     maxLength={4000}
                     aria-label="输入消息"
@@ -478,6 +489,8 @@ export default function AgentConsole() {
             </aside>
           </div>
         )}
+
+        {activeView === "channels" && <ImChannelPage />}
 
         {activeView === "thoughts" && (
           <section className="page-panel">
@@ -571,6 +584,8 @@ export default function AgentConsole() {
             </div>
           </section>
         )}
+
+        {activeView === "jobs" && <JobsPage />}
 
         {activeView === "settings" && (
           <section className="page-panel settings-page">
