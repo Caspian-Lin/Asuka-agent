@@ -1,0 +1,37 @@
+{
+  "suite": "phase1-memory-smoke",
+  "version": "0.1.0",
+  "description": "第一阶段可复现的记忆召回与拒答烟雾测试。",
+  "cases": [
+    {
+      "id": "case-interface-recall",
+      "category": "single_fact_recall",
+      "prompt": "用户更喜欢可视化网页看板还是所有操作都使用纯命令行？",
+      "expected": {
+        "expectedMemoryId": "memory-interface",
+        "topK": 3
+      },
+      "tags": ["preference", "retrieval"]
+    },
+    {
+      "id": "case-project-recall",
+      "category": "goal_recall",
+      "prompt": "用户正在规划什么类型的 Agent 系统？",
+      "expected": {
+        "expectedMemoryId": "memory-project",
+        "topK": 3
+      },
+      "tags": ["goal", "retrieval"]
+    },
+    {
+      "id": "case-abstention",
+      "category": "abstention",
+      "prompt": "用户的生日具体是哪一天？",
+      "expected": {
+        "abstain": true,
+        "maxTopScore": 1.25
+      },
+      "tags": ["unknown", "abstention"]
+    }
+  ]
+}
