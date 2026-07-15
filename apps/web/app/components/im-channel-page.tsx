@@ -1,6 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  LuCheckCheck,
+  LuInbox,
+  LuPlugZap,
+  LuRefreshCw,
+} from "react-icons/lu";
 import { controlRequest } from "./control-api";
 
 type ImConversation = {
@@ -114,10 +120,11 @@ export default function ImChannelPage() {
     return (
       <section className="page-panel">
         <div className="service-error">
+          <LuPlugZap className="state-illustration" aria-hidden />
           <span>连接中断</span>
           <h1>无法读取 IM Channel</h1>
           <p>{error}</p>
-          <button className="primary-button" onClick={() => void load()}>重新连接</button>
+          <button className="primary-button" onClick={() => void load()}><LuRefreshCw aria-hidden />重新连接</button>
         </div>
       </section>
     );
@@ -130,7 +137,7 @@ export default function ImChannelPage() {
     <section className="page-panel im-page">
       <div className="page-hero">
         <div>
-          <span className="section-kicker">PostgreSQL · NapCat OneBot 11</span>
+          <span className="page-context">PostgreSQL · NapCat OneBot 11</span>
           <h1>IM Channel</h1>
           <p>只保留白名单 QQ 群和私聊联系人消息。WebSocket 事件先进入不可变接收箱，再由 worker 投影为可读会话。</p>
         </div>
@@ -139,7 +146,7 @@ export default function ImChannelPage() {
 
       {channels.length === 0 ? (
         <div className="empty-state channel-empty">
-          <span className="empty-orbit">⌁</span>
+          <LuPlugZap className="empty-icon" aria-hidden />
           <h3>尚未发现 Channel</h3>
           <p>启动 `make backend`；网关鉴权成功后会登记当前 NapCat 账号。</p>
         </div>
@@ -178,15 +185,15 @@ export default function ImChannelPage() {
 
           <section className="im-history">
             <header>
-              <div><span className="section-kicker">Message history</span><h2>{selectedConversation?.title ?? "选择一个群会话"}</h2></div>
+              <div><span className="page-context">Message history</span><h2>{selectedConversation?.title ?? "选择一个群会话"}</h2></div>
               <button className="ghost-button" disabled={!selectedConversation || loading || !selectedConversation.unread_count} onClick={() => void markRead()}>
-                全部标为已读
+                <LuCheckCheck aria-hidden />全部标为已读
               </button>
             </header>
             {error && <p className="inline-error">{error}</p>}
             <div className="im-message-list">
               {(snapshot?.messages ?? []).length === 0 ? (
-                <div className="empty-state"><span className="empty-orbit">◌</span><h3>暂无历史消息</h3><p>收到白名单群或私聊文本消息后会显示在这里。</p></div>
+                <div className="empty-state"><LuInbox className="empty-icon" aria-hidden /><h3>暂无历史消息</h3><p>收到白名单群或私聊文本消息后会显示在这里。</p></div>
               ) : snapshot?.messages.map((message) => (
                 <article className={`im-message ${message.read_at ? "read" : "unread"}`} key={message.id}>
                   <span className="im-avatar">{message.sender_name.slice(0, 1).toUpperCase()}</span>

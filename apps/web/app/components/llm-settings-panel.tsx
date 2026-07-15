@@ -1,6 +1,16 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import {
+  LuCircleAlert,
+  LuCircleCheck,
+  LuCircleDashed,
+  LuKeyRound,
+  LuPlugZap,
+  LuSave,
+  LuShieldCheck,
+  LuTrash2,
+} from "react-icons/lu";
 import { controlRequest } from "./control-api";
 import { buildLlmSettingsPayload } from "./llm-settings-form";
 
@@ -153,7 +163,7 @@ export default function LlmSettingsPanel() {
           <h2 id="llm-settings-title">模型 API</h2>
           <p>业务代码按用途明确选择档位；密钥只在服务端加密保存，页面不会回填。</p>
         </div>
-        <span className="no-fallback-badge">不自动降级</span>
+        <span className="no-fallback-badge"><LuShieldCheck aria-hidden />不自动降级</span>
       </header>
 
       {error && <div className="inline-error" role="alert">{error}</div>}
@@ -166,6 +176,11 @@ export default function LlmSettingsPanel() {
           <div className="llm-profile-list">
             {settings.profiles.map((profile) => {
               const copy = profileCopy[profile.profile];
+              const AvailabilityIcon = profile.availability === "healthy"
+                ? LuCircleCheck
+                : profile.availability === "error" || profile.availability === "missing_key"
+                  ? LuCircleAlert
+                  : LuCircleDashed;
               const saving = busy === `save-${profile.profile}`;
               const testing = busy === `test-${profile.profile}`;
               const deleting = busy === `delete-${profile.profile}`;
@@ -183,7 +198,7 @@ export default function LlmSettingsPanel() {
                     </div>
                     <div className="llm-profile-state">
                       <span className={`connection-state state-${profile.availability}`}>
-                        <i />{availabilityCopy[profile.availability]}
+                        <AvailabilityIcon aria-hidden />{availabilityCopy[profile.availability]}
                       </span>
                       <label className="switch" title="启用此模型档位">
                         <input name="enabled" type="checkbox" defaultChecked={profile.enabled} />
@@ -247,10 +262,11 @@ export default function LlmSettingsPanel() {
                         autoComplete="new-password"
                         placeholder={profile.keyConfigured ? "已配置；留空则保留原值" : "输入 API Key"}
                       />
-                      <small>
+                      <small className="key-status-copy">
+                        <LuKeyRound aria-hidden />
                         {profile.keyConfigured
                           ? `${profile.keyMask} 已加密保存。服务端只返回固定掩码。`
-                          : "○ 尚未配置。启用前必须提供密钥。"}
+                          : "尚未配置。启用前必须提供密钥。"}
                       </small>
                     </label>
                   </div>
@@ -271,7 +287,7 @@ export default function LlmSettingsPanel() {
                           disabled={Boolean(busy)}
                           onClick={() => void deleteKey(profile.profile)}
                         >
-                          {deleting ? "删除中…" : "删除密钥"}
+                          <LuTrash2 aria-hidden />{deleting ? "删除中…" : "删除密钥"}
                         </button>
                       )}
                       <button
@@ -280,10 +296,10 @@ export default function LlmSettingsPanel() {
                         disabled={Boolean(busy) || !profile.keyConfigured}
                         onClick={() => void testProfile(profile.profile)}
                       >
-                        {testing ? "测试中…" : "测试连接"}
+                        <LuPlugZap aria-hidden />{testing ? "测试中…" : "测试连接"}
                       </button>
                       <button className="primary-button" disabled={Boolean(busy)}>
-                        {saving ? "保存中…" : "保存配置"}
+                        <LuSave aria-hidden />{saving ? "保存中…" : "保存配置"}
                       </button>
                     </div>
                   </footer>

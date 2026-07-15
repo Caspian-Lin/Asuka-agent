@@ -1,6 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  LuBrainCircuit,
+  LuCircle,
+  LuFileInput,
+  LuListTree,
+  LuMessageSquareText,
+} from "react-icons/lu";
 import { controlRequest } from "./control-api";
 
 type ThoughtRun = {
@@ -167,7 +174,7 @@ export default function ThoughtRunsPage({
   return (
     <section className="page-panel thought-runs-page">
       <div className="page-hero">
-        <div><span className="section-kicker">Cognition trace</span><h1>思绪运行</h1><p>一次思绪从触发原因开始，串联一轮或多轮模型调用、上下文、记忆及外部来源。这里展示可审计结果，不承担数据标注。</p></div>
+        <div><span className="page-context">Cognition trace</span><h1>思绪运行</h1><p>一次思绪从触发原因开始，串联一轮或多轮模型调用、上下文、记忆及外部来源。这里展示可审计结果，不承担数据标注。</p></div>
         <div className="dual-stat"><span><strong>{runs.length}</strong>次运行</span><i /><span><strong>{totals.tokens}</strong>tokens</span></div>
       </div>
 
@@ -175,7 +182,7 @@ export default function ThoughtRunsPage({
       {loading ? (
         <div className="jobs-skeleton" aria-label="正在载入思绪"><i /><i /><i /></div>
       ) : runs.length === 0 ? (
-        <div className="empty-state"><span className="empty-orbit">◌</span><h3>还没有真实思绪运行</h3><p>定时任务处理到新的 QQ 消息后，会在这里留下触发、模型轮次和引用记录。</p></div>
+        <div className="empty-state"><LuBrainCircuit className="empty-icon" aria-hidden /><h3>还没有真实思绪运行</h3><p>定时任务处理到新的 QQ 消息后，会在这里留下触发、模型轮次和引用记录。</p></div>
       ) : (
         <div className="thought-workspace">
           <div className="thought-run-list" aria-label="思绪运行列表">
@@ -185,7 +192,7 @@ export default function ThoughtRunsPage({
                 key={run.id}
                 onClick={() => setSelectedId(run.id)}
               >
-                <span className={`run-dot state-${run.status}`} />
+                <LuCircle className={`run-dot state-${run.status}`} aria-hidden />
                 <span><strong>{run.summary ?? "运行未产生结论"}</strong><small>{run.conversation_title} · {triggerLabel(run.trigger_type)}</small></span>
                 <span><strong>{run.call_count} 轮</strong><small>{run.input_tokens + run.output_tokens} tokens</small></span>
                 <time>{formatDateTime(run.started_at)}</time>
@@ -215,7 +222,7 @@ export default function ThoughtRunsPage({
                   {detail.calls.map((call) => (
                     <section className="thought-round" key={call.id}>
                       <header>
-                        <div><strong>第 {call.sequence_number} 轮模型调用</strong><small>{call.profile} · {call.model ?? call.provider}</small></div>
+                        <div><LuBrainCircuit aria-hidden /><strong>第 {call.sequence_number} 轮模型调用</strong><small>{call.profile} · {call.model ?? call.provider}</small></div>
                         <span>{call.input_tokens ?? 0} in / {call.output_tokens ?? 0} out · {call.latency_ms ?? 0} ms</span>
                       </header>
 
@@ -223,21 +230,21 @@ export default function ThoughtRunsPage({
                         <h3>引用与输入来源</h3>
                         {call.context_items.length === 0 ? <p>旧运行没有保存结构化来源。</p> : call.context_items.map((item) => (
                           <article key={item.id}>
-                            <span>{item.itemType === "message" ? "消息" : item.itemType === "memory_candidate" ? "候选记忆" : item.itemType}</span>
+                            <span><LuFileInput aria-hidden />{item.itemType === "message" ? "消息" : item.itemType === "memory_candidate" ? "候选记忆" : item.itemType}</span>
                             <div><strong>{item.title}</strong>{item.content && <p>{item.content}</p>}<small>{item.referenceId ?? "无引用 ID"}</small></div>
                           </article>
                         ))}
                       </div>
 
                       <details className="model-context">
-                        <summary>查看本轮完整模型上下文</summary>
+                        <summary><LuListTree aria-hidden />查看本轮完整模型上下文</summary>
                         {call.request_context.map((message, index) => (
                           <article key={`${call.id}-message-${index}`}><span>{message.role}</span><pre>{message.content}</pre></article>
                         ))}
                       </details>
 
                       <details className="model-output">
-                        <summary>查看本轮模型输出</summary>
+                        <summary><LuMessageSquareText aria-hidden />查看本轮模型输出</summary>
                         <pre>{responseText(call)}</pre>
                       </details>
                     </section>
