@@ -23,6 +23,66 @@ export const agents = pgTable("agents", {
 
 export const llmProfile = pgEnum("llm_profile", ["primary", "fast"]);
 
+export const messageAuthorKind = pgEnum("message_author_kind", [
+  "user",
+  "agent",
+  "system",
+]);
+
+export const messageDirection = pgEnum("message_direction", [
+  "inbound",
+  "outbound",
+  "internal",
+]);
+
+export const thoughtStreamStatus = pgEnum("thought_stream_status", [
+  "active",
+  "paused",
+  "archived",
+]);
+
+export const thoughtEpochStatus = pgEnum("thought_epoch_status", [
+  "active",
+  "compressing",
+  "closed",
+  "failed",
+]);
+
+export const thoughtRunStage = pgEnum("thought_run_stage", [
+  "pending",
+  "primary",
+  "compiler",
+  "revision",
+  "committing",
+  "completed",
+  "failed",
+]);
+
+export const llmCallPurpose = pgEnum("llm_call_purpose", [
+  "primary",
+  "tool_continuation",
+  "compiler",
+  "revision",
+  "compression",
+]);
+
+export const actionProposalType = pgEnum("action_proposal_type", [
+  "reply",
+  "memory",
+  "task",
+  "no_action",
+]);
+
+export const actionProposalStatus = pgEnum("action_proposal_status", [
+  "proposed",
+  "policy_approved",
+  "policy_rejected",
+  "executing",
+  "executed",
+  "failed",
+  "cancelled",
+]);
+
 export const llmProfileSettings = pgTable(
   "llm_profile_settings",
   {
@@ -129,10 +189,14 @@ export const messages = pgTable(
       .notNull()
       .references(() => conversations.id, { onDelete: "cascade" }),
     role: text("role").notNull(),
+    authorKind: messageAuthorKind("author_kind").notNull().default("user"),
+    direction: messageDirection("direction").notNull().default("inbound"),
     content: text("content").notNull(),
     senderId: text("sender_id"),
     senderDisplayName: text("sender_display_name"),
     replyToExternalMessageId: text("reply_to_external_message_id"),
+    externalMessageId: text("external_message_id"),
+    externalReceipt: jsonb("external_receipt").notNull().default({}),
     citationsJson: jsonb("citations_json").notNull().default([]),
     correlationId: text("correlation_id").notNull(),
     readAt: timestamp("read_at", { withTimezone: true }),
@@ -147,6 +211,9 @@ export const messages = pgTable(
       .on(table.conversationId, table.createdAt)
       .where(sql`${table.role} = 'user' and ${table.readAt} is null`),
     index("messages_sender_idx").on(table.conversationId, table.senderId),
+    uniqueIndex("messages_conversation_external_uidx")
+      .on(table.conversationId, table.externalMessageId)
+      .where(sql`${table.externalMessageId} is not null`),
   ],
 );
 
@@ -278,6 +345,66 @@ export const jobRuns = pgTable(
   ],
 );
 
+/** One persistent, conversation-isolated short-term cognition stream. */
+export const thoughtStreams = pgTable(
+  "thought_streams",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    status: thoughtStreamStatus("status").notNull().default("active"),
+    currentEpochOrdinal: integer("current_epoch_ordinal").notNull().default(1),
+    committedMessageAt: timestamp("committed_message_at", { withTimezone: true }),
+    committedMessageId: text("committed_message_id"),
+    version: integer("version").notNull().default(0),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("thought_streams_agent_conversation_uidx").on(
+      table.agentId,
+      table.conversationId,
+    ),
+    index("thought_streams_status_idx").on(table.status, table.updatedAt),
+    index("thought_streams_lease_idx").on(table.leaseExpiresAt),
+  ],
+);
+
+/** An append-only context epoch; compression closes one epoch and opens another. */
+export const thoughtStreamEpochs = pgTable(
+  "thought_stream_epochs",
+  {
+    id: text("id").primaryKey(),
+    streamId: text("stream_id")
+      .notNull()
+      .references(() => thoughtStreams.id, { onDelete: "cascade" }),
+    ordinal: integer("ordinal").notNull(),
+    status: thoughtEpochStatus("status").notNull().default("active"),
+    compressionOutput: text("compression_output"),
+    compressionPromptVersion: text("compression_prompt_version"),
+    coversThroughThoughtRunId: text("covers_through_thought_run_id"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("thought_stream_epochs_stream_ordinal_uidx").on(
+      table.streamId,
+      table.ordinal,
+    ),
+    index("thought_stream_epochs_status_idx").on(table.streamId, table.status),
+  ],
+);
+
 /** One inspectable cognition process for one conversation and trigger. */
 export const thoughtRuns = pgTable(
   "thought_runs",
@@ -289,6 +416,13 @@ export const thoughtRuns = pgTable(
     conversationId: text("conversation_id")
       .notNull()
       .references(() => conversations.id, { onDelete: "cascade" }),
+    streamId: text("stream_id")
+      .notNull()
+      .references(() => thoughtStreams.id, { onDelete: "cascade" }),
+    epochId: text("epoch_id")
+      .notNull()
+      .references(() => thoughtStreamEpochs.id, { onDelete: "restrict" }),
+    turnOrdinal: integer("turn_ordinal").notNull(),
     jobRunId: text("job_run_id")
       .notNull()
       .references(() => jobRuns.id, { onDelete: "cascade" }),
@@ -296,6 +430,11 @@ export const thoughtRuns = pgTable(
     triggerType: text("trigger_type").notNull(),
     triggerReason: text("trigger_reason").notNull(),
     status: text("status").notNull(),
+    processingStage: thoughtRunStage("processing_stage").notNull().default("pending"),
+    newMessageStartAt: timestamp("new_message_start_at", { withTimezone: true }),
+    newMessageStartId: text("new_message_start_id"),
+    newMessageEndAt: timestamp("new_message_end_at", { withTimezone: true }),
+    newMessageEndId: text("new_message_end_id"),
     decision: text("decision"),
     summary: text("summary"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
@@ -312,6 +451,11 @@ export const thoughtRuns = pgTable(
       table.createdAt,
     ),
     index("thought_runs_trigger_time_idx").on(table.triggerType, table.createdAt),
+    uniqueIndex("thought_runs_stream_turn_uidx").on(
+      table.streamId,
+      table.turnOrdinal,
+    ),
+    index("thought_runs_epoch_turn_idx").on(table.epochId, table.turnOrdinal),
   ],
 );
 
@@ -432,6 +576,7 @@ export const llmCalls = pgTable(
     provider: text("provider").notNull(),
     model: text("model"),
     promptVersion: text("prompt_version").notNull(),
+    purpose: llmCallPurpose("purpose").notNull().default("primary"),
     inputHash: text("input_hash").notNull(),
     outputHash: text("output_hash"),
     status: text("status").notNull(),
@@ -450,6 +595,37 @@ export const llmCalls = pgTable(
       table.thoughtRunId,
       table.sequenceNumber,
     ),
+  ],
+);
+
+/** A compiler result awaiting deterministic policy evaluation and execution. */
+export const actionProposals = pgTable(
+  "action_proposals",
+  {
+    id: text("id").primaryKey(),
+    thoughtRunId: text("thought_run_id")
+      .notNull()
+      .references(() => thoughtRuns.id, { onDelete: "cascade" }),
+    compilerLlmCallId: text("compiler_llm_call_id")
+      .references(() => llmCalls.id, { onDelete: "set null" }),
+    ordinal: integer("ordinal").notNull(),
+    proposalType: actionProposalType("proposal_type").notNull(),
+    status: actionProposalStatus("status").notNull().default("proposed"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    payload: jsonb("payload").notNull().default({}),
+    evidenceReferences: jsonb("evidence_references").notNull().default([]),
+    policyReasons: jsonb("policy_reasons").notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("action_proposals_idempotency_uidx").on(table.idempotencyKey),
+    uniqueIndex("action_proposals_thought_ordinal_uidx").on(
+      table.thoughtRunId,
+      table.ordinal,
+    ),
+    index("action_proposals_status_idx").on(table.status, table.createdAt),
+    index("action_proposals_compiler_call_idx").on(table.compilerLlmCallId),
   ],
 );
 

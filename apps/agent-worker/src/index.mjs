@@ -64,8 +64,8 @@ function replyToExternalMessageId(segments) {
 async function processBatch() {
   return sql.begin(async (tx) => {
     const deliveries = await tx`
-      SELECT id, channel_id, external_conversation_id, sender_id, content,
-             raw_payload, sent_at, received_at
+      SELECT id, channel_id, external_conversation_id, external_message_id,
+             sender_id, content, raw_payload, sent_at, received_at
       FROM inbound_deliveries
       WHERE status = 'received'
       ORDER BY received_at
@@ -111,12 +111,14 @@ async function processBatch() {
       `;
       await tx`
         INSERT INTO messages (
-          id, conversation_id, role, content, sender_id, sender_display_name,
-          reply_to_external_message_id, citations_json, correlation_id, read_at,
-          created_at
+          id, conversation_id, role, author_kind, direction, content,
+          sender_id, sender_display_name, reply_to_external_message_id,
+          external_message_id, external_receipt, citations_json,
+          correlation_id, read_at, created_at
         ) VALUES (
-          ${delivery.id}, ${conversationId}, 'user', ${content},
-          ${delivery.sender_id}, ${displayName}, ${replyTo}, '[]'::jsonb,
+          ${delivery.id}, ${conversationId}, 'user', 'user', 'inbound',
+          ${content}, ${delivery.sender_id}, ${displayName}, ${replyTo},
+          ${delivery.external_message_id}, ${tx.json({})}, '[]'::jsonb,
           ${correlationId}, NULL, ${messageTime}
         )
         ON CONFLICT (id) DO NOTHING
