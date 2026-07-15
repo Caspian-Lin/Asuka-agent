@@ -141,15 +141,24 @@ export function buildSpeakerContext({ conversation, participants, messages, exis
   }
   const normalizedMessages = messages.map((message) => ({
     message_id: String(message.id),
+    author_kind: String(message.authorKind ?? "user"),
+    direction: String(message.direction ?? "inbound"),
     sender_id: message.senderId == null ? null : String(message.senderId),
     sender_display_name: message.senderDisplayName == null
       ? null
       : String(message.senderDisplayName),
     reply_to: message.replyTo == null ? null : String(message.replyTo),
     sent_at: new Date(message.createdAt).toISOString(),
+    conversation_type: String(
+      conversation.type ?? (String(conversation.externalId).startsWith("private:")
+        ? "private"
+        : "group"),
+    ),
     content: String(message.content),
   }));
-  if (normalizedMessages.some((message) => !message.sender_id)) {
+  if (normalizedMessages.some((message) => (
+    message.author_kind === "user" && !message.sender_id
+  ))) {
     throw new CognitionValidationError(
       "speaker_missing",
       "入站消息缺少稳定 sender_id，不能进入认知任务",
@@ -166,6 +175,7 @@ export function buildSpeakerContext({ conversation, participants, messages, exis
     });
   }
   for (const message of normalizedMessages) {
+    if (!message.sender_id) continue;
     if (!participantById.has(message.sender_id)) {
       participantById.set(message.sender_id, {
         participant_id: message.sender_id,
@@ -180,6 +190,11 @@ export function buildSpeakerContext({ conversation, participants, messages, exis
       title: String(conversation.title),
       channel: String(conversation.channel),
       external_id: conversation.externalId == null ? null : String(conversation.externalId),
+      type: String(
+        conversation.type ?? (String(conversation.externalId).startsWith("private:")
+          ? "private"
+          : "group"),
+      ),
     },
     participants: [...participantById.values()],
     messages: normalizedMessages,

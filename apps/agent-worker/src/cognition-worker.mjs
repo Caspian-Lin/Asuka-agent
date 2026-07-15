@@ -10,6 +10,11 @@ import {
   validateThoughtOutput,
 } from "@asuka-agent/agent-core/scheduled-cognition";
 import {
+  projectThoughtContext,
+  selectInitializationHistory,
+  ThoughtContextError,
+} from "@asuka-agent/agent-core/thought-context";
+import {
   decryptApiKey,
   LlmConfigurationError,
   OpenAiCompatibleProvider,
@@ -50,6 +55,9 @@ export function retryDelayMs(attemptCount) {
 export function cognitionError(error) {
   if (error instanceof CognitionValidationError) {
     return { code: error.code, message: error.message, retryable: error.retryable };
+  }
+  if (error instanceof ThoughtContextError) {
+    return { code: error.code, message: error.message, retryable: false };
   }
   if (error instanceof LlmConfigurationError) {
     const retryable = error.code === "provider_timeout" ||
@@ -195,16 +203,41 @@ export function createCognitionWorker({
 
   async function heartbeat(runId) {
     const now = clock();
+    const expiresAt = new Date(now.getTime() + leaseMs);
+    await sql.begin(async (tx) => {
+      await tx`
+        UPDATE job_runs
+        SET heartbeat_at = ${now}, lease_expires_at = ${expiresAt}
+        WHERE id = ${runId} AND status = 'running' AND lease_owner = ${leaseOwner}
+      `;
+      await tx`
+        UPDATE thought_streams AS stream
+        SET heartbeat_at = ${now}, lease_expires_at = ${expiresAt}, updated_at = ${now}
+        WHERE stream.lease_owner = ${leaseOwner}
+          AND EXISTS (
+            SELECT 1 FROM thought_runs thought
+            WHERE thought.stream_id = stream.id AND thought.job_run_id = ${runId}
+          )
+      `;
+    });
+  }
+
+  async function releaseThoughtStream(thoughtRunId) {
+    const now = clock();
     await sql`
-      UPDATE job_runs
-      SET heartbeat_at = ${now}, lease_expires_at = ${new Date(now.getTime() + leaseMs)}
-      WHERE id = ${runId} AND status = 'running' AND lease_owner = ${leaseOwner}
+      UPDATE thought_streams AS stream
+      SET lease_owner = NULL, lease_expires_at = NULL, heartbeat_at = ${now},
+          updated_at = ${now}
+      FROM thought_runs AS thought
+      WHERE thought.id = ${thoughtRunId}
+        AND stream.id = thought.stream_id
+        AND stream.lease_owner = ${leaseOwner}
     `;
   }
 
   async function loadProfile(profile) {
     const rows = await sql`
-      SELECT enabled, base_url, model_id, encrypted_api_key
+      SELECT enabled, base_url, model_id, encrypted_api_key, context_window
       FROM llm_profile_settings
       WHERE agent_id = 'agent-asuka' AND profile = ${profile}
       LIMIT 1
@@ -215,6 +248,7 @@ export function createCognitionWorker({
       enabled: row.enabled,
       baseUrl: row.base_url,
       modelId: row.model_id,
+      contextWindow: Number(row.context_window),
       apiKey: row.encrypted_api_key
         ? decryptApiKey(row.encrypted_api_key, parseEncryptionKey(encryptionKey))
         : null,
@@ -224,8 +258,19 @@ export function createCognitionWorker({
   async function eligibleConversations(run) {
     return sql`
       SELECT c.id, c.title, c.channel, c.external_id,
-             watermark.last_message_at, watermark.last_message_id
+             CASE WHEN ${run.job_type} = 'thought_tick'
+               THEN stream.committed_message_at
+               ELSE watermark.last_message_at
+             END AS last_message_at,
+             CASE WHEN ${run.job_type} = 'thought_tick'
+               THEN stream.committed_message_id
+               ELSE watermark.last_message_id
+             END AS last_message_id
       FROM conversations AS c
+      LEFT JOIN thought_streams AS stream
+        ON stream.agent_id = c.agent_id
+       AND stream.conversation_id = c.id
+       AND stream.status = 'active'
       LEFT JOIN job_conversation_watermarks AS watermark
         ON watermark.job_id = ${run.job_id}
        AND watermark.conversation_id = c.id
@@ -236,11 +281,25 @@ export function createCognitionWorker({
           SELECT 1
           FROM messages AS message
           WHERE message.conversation_id = c.id
+            AND message.author_kind = 'user'
+            AND message.direction = 'inbound'
             AND message.sender_id IS NOT NULL
             AND (
-              watermark.last_message_at IS NULL
+              (CASE WHEN ${run.job_type} = 'thought_tick'
+                THEN stream.committed_message_at
+                ELSE watermark.last_message_at
+              END) IS NULL
               OR (message.created_at, message.id) >
-                 (watermark.last_message_at, watermark.last_message_id)
+                 (
+                   CASE WHEN ${run.job_type} = 'thought_tick'
+                     THEN stream.committed_message_at
+                     ELSE watermark.last_message_at
+                   END,
+                   CASE WHEN ${run.job_type} = 'thought_tick'
+                     THEN stream.committed_message_id
+                     ELSE watermark.last_message_id
+                   END
+                 )
             )
         )
       ORDER BY c.updated_at
@@ -248,13 +307,15 @@ export function createCognitionWorker({
   }
 
   async function loadContext(run, conversation) {
-    const maxMessages = Math.min(200, Math.max(1, Number(run.config?.maxMessages ?? 50)));
+    const maxMessages = Math.min(
+      1_000,
+      Math.max(1, Number(run.config?.maxBatchMessages ?? 500)),
+    );
     const messages = await sql`
-      SELECT id, sender_id, sender_display_name, reply_to_external_message_id,
-             content, created_at
+      SELECT id, author_kind, direction, sender_id, sender_display_name,
+             reply_to_external_message_id, content, created_at
       FROM messages
       WHERE conversation_id = ${conversation.id}
-        AND sender_id IS NOT NULL
         AND (
           ${conversation.last_message_at}::timestamptz IS NULL
           OR (created_at, id) >
@@ -293,6 +354,8 @@ export function createCognitionWorker({
       })),
       messages: messages.map((message) => ({
         id: message.id,
+        authorKind: message.author_kind,
+        direction: message.direction,
         senderId: message.sender_id,
         senderDisplayName: message.sender_display_name,
         replyTo: message.reply_to_external_message_id,
@@ -316,6 +379,7 @@ export function createCognitionWorker({
     const firstMessage = context.messages[0];
     const lastMessage = context.messages.at(-1);
     const now = clock();
+    const streamLeaseExpiresAt = new Date(now.getTime() + leaseMs);
     return sql.begin(async (tx) => {
       await tx`
         INSERT INTO thought_streams (
@@ -328,12 +392,32 @@ export function createCognitionWorker({
         ON CONFLICT (agent_id, conversation_id) DO NOTHING
       `;
       const streams = await tx`
-        SELECT id, current_epoch_ordinal
+        SELECT id, status, current_epoch_ordinal, lease_owner, lease_expires_at
         FROM thought_streams
         WHERE agent_id = ${run.agent_id} AND conversation_id = ${conversation.id}
         FOR UPDATE
       `;
       const stream = streams[0];
+      if (stream.status !== "active") {
+        throw new CognitionValidationError(
+          "stream_inactive",
+          "当前会话 Thought Stream 未启用",
+        );
+      }
+      if (stream.lease_owner && stream.lease_owner !== leaseOwner &&
+          stream.lease_expires_at && new Date(stream.lease_expires_at) > now) {
+        throw new CognitionValidationError(
+          "stream_busy",
+          "当前会话 Thought Stream 正由另一个 worker 处理",
+          true,
+        );
+      }
+      await tx`
+        UPDATE thought_streams
+        SET lease_owner = ${leaseOwner}, lease_expires_at = ${streamLeaseExpiresAt},
+            heartbeat_at = ${now}, updated_at = ${now}
+        WHERE id = ${stream.id}
+      `;
       const epochId = thoughtEpochIdFor(stream.id, stream.current_epoch_ordinal);
       await tx`
         INSERT INTO thought_stream_epochs (
@@ -345,7 +429,7 @@ export function createCognitionWorker({
         ON CONFLICT (stream_id, ordinal) DO NOTHING
       `;
       const existing = await tx`
-        SELECT id
+        SELECT id, stream_id, epoch_id, turn_ordinal
         FROM thought_runs
         WHERE job_run_id = ${run.id} AND conversation_id = ${conversation.id}
         LIMIT 1
@@ -353,10 +437,17 @@ export function createCognitionWorker({
       if (existing[0]) {
         await tx`
           UPDATE thought_runs
-          SET status = 'running', processing_stage = 'primary', completed_at = NULL
+          SET status = 'running', processing_stage = 'primary', completed_at = NULL,
+              new_message_end_at = ${lastMessage.sent_at},
+              new_message_end_id = ${lastMessage.message_id}
           WHERE id = ${existing[0].id}
         `;
-        return existing[0].id;
+        return {
+          id: existing[0].id,
+          streamId: existing[0].stream_id,
+          epochId: existing[0].epoch_id,
+          turnOrdinal: Number(existing[0].turn_ordinal),
+        };
       }
       const ordinals = await tx`
         SELECT COALESCE(max(turn_ordinal), 0)::int + 1 AS next_ordinal
@@ -378,14 +469,135 @@ export function createCognitionWorker({
         )
         RETURNING id
       `;
-      return rows[0].id;
+      return {
+        id: rows[0].id,
+        streamId: stream.id,
+        epochId,
+        turnOrdinal: Number(ordinals[0].next_ordinal),
+      };
     });
+  }
+
+  function sourceFromRow(row, conversationType) {
+    return {
+      message_id: String(row.id),
+      author_kind: String(row.author_kind),
+      direction: String(row.direction),
+      sender_id: row.sender_id == null ? null : String(row.sender_id),
+      sender_display_name: row.sender_display_name == null
+        ? null
+        : String(row.sender_display_name),
+      reply_to: row.reply_to_external_message_id == null
+        ? null
+        : String(row.reply_to_external_message_id),
+      sent_at: new Date(row.created_at).toISOString(),
+      conversation_type: conversationType,
+      content: String(row.content),
+    };
+  }
+
+  async function loadProjectionContext(run, conversation, context, thoughtRun) {
+    const firstMessage = context.messages[0];
+    const lastMessage = context.messages.at(-1);
+    const conversationType = context.conversation.type;
+    const historyCount = Math.min(100, Math.max(0, Number(run.config?.historyMessages ?? 20)));
+    const historyMinutes = Math.min(
+      24 * 60,
+      Math.max(0, Number(run.config?.historyMinutes ?? 30)),
+    );
+    const [epochRows, historyRows, committedRows] = await Promise.all([
+      sql`
+        SELECT id, ordinal, compression_output, compression_prompt_version
+        FROM thought_stream_epochs
+        WHERE id = ${thoughtRun.epochId}
+        LIMIT 1
+      `,
+      sql`
+        SELECT id, author_kind, direction, sender_id, sender_display_name,
+               reply_to_external_message_id, content, created_at
+        FROM messages
+        WHERE conversation_id = ${conversation.id}
+          AND (created_at, id) < (${firstMessage.sent_at}, ${firstMessage.message_id})
+        ORDER BY created_at DESC, id DESC
+        LIMIT 500
+      `,
+      sql`
+        SELECT thought.id, thought.turn_ordinal, thought.new_message_start_at,
+               thought.new_message_start_id, thought.new_message_end_at,
+               thought.new_message_end_id, call.response_json ->> 'content' AS primary_output,
+               proposal.proposal_state AS action_state
+        FROM thought_runs AS thought
+        LEFT JOIN LATERAL (
+          SELECT response_json
+          FROM llm_calls
+          WHERE thought_run_id = thought.id
+            AND purpose IN ('primary', 'revision')
+            AND status = 'succeeded'
+          ORDER BY sequence_number DESC
+          LIMIT 1
+        ) AS call ON true
+        LEFT JOIN LATERAL (
+          SELECT string_agg(status::text, ',' ORDER BY ordinal) AS proposal_state
+          FROM action_proposals
+          WHERE thought_run_id = thought.id
+        ) AS proposal ON true
+        WHERE thought.stream_id = ${thoughtRun.streamId}
+          AND thought.epoch_id = ${thoughtRun.epochId}
+          AND thought.turn_ordinal < ${thoughtRun.turnOrdinal}
+          AND thought.status = 'completed'
+        ORDER BY thought.turn_ordinal
+      `,
+    ]);
+    const committedTurns = await Promise.all(committedRows.map(async (turn) => {
+      const rows = await sql`
+        SELECT id, author_kind, direction, sender_id, sender_display_name,
+               reply_to_external_message_id, content, created_at
+        FROM messages
+        WHERE conversation_id = ${conversation.id}
+          AND (created_at, id) >= (${turn.new_message_start_at}, ${turn.new_message_start_id})
+          AND (created_at, id) <= (${turn.new_message_end_at}, ${turn.new_message_end_id})
+        ORDER BY created_at, id
+      `;
+      return {
+        thoughtRunId: String(turn.id),
+        turnOrdinal: Number(turn.turn_ordinal),
+        newMessages: rows.map((row) => sourceFromRow(row, conversationType)),
+        primaryOutput: turn.primary_output == null ? null : String(turn.primary_output),
+        actionState: turn.action_state == null ? null : String(turn.action_state),
+      };
+    }));
+    const candidates = historyRows
+      .map((row) => sourceFromRow(row, conversationType))
+      .reverse();
+    const initializationHistory = committedTurns.length === 0
+      ? selectInitializationHistory({
+          messages: candidates,
+          maxCount: historyCount,
+          recentMinutes: historyMinutes,
+          anchorAt: lastMessage.sent_at,
+        })
+      : [];
+    const epoch = epochRows[0];
+    return {
+      compression: epoch?.compression_output
+        ? {
+            epochId: epoch.id,
+            ordinal: Number(epoch.ordinal),
+            output: String(epoch.compression_output),
+            promptVersion: epoch.compression_prompt_version,
+          }
+        : null,
+      initializationHistory,
+      committedTurns,
+      recalledMemories: [],
+    };
   }
 
   async function recordLlmCall({
     run,
     thoughtRunId,
     context,
+    projection,
     request,
     configuration,
     result,
@@ -412,7 +624,7 @@ export function createCognitionWorker({
           id, job_run_id, thought_run_id, conversation_id, correlation_id,
           profile, provider, model, prompt_version, input_hash, output_hash,
           status, error_code, latency_ms, input_tokens, output_tokens,
-          sequence_number, request_context, response_json, created_at
+          sequence_number, purpose, request_context, response_json, created_at
         ) VALUES (
           ${callId}, ${run.id}, ${thoughtRunId},
           ${context.conversation.conversation_id}, ${run.correlation_id},
@@ -421,35 +633,14 @@ export function createCognitionWorker({
           ${request.promptVersion}, ${stableHash(requestMessages)},
           ${result ? stableHash(result.content) : null},
           ${failure ? "failed" : "succeeded"}, ${failure?.code ?? null},
-          ${result?.latencyMs ?? null}, ${result?.inputTokens ?? null},
+          ${result?.latencyMs ?? null}, ${result?.inputTokens ?? projection?.inputTokens ?? null},
           ${result?.outputTokens ?? null}, ${sequenceRows[0].next_sequence},
+          ${request.purpose ?? "primary"},
           ${tx.json(requestMessages)},
           ${result ? tx.json({ content: result.content }) : null}, ${now}
         )
       `;
-      const contextItems = [
-        ...context.messages.map((message) => ({
-          itemType: "message",
-          referenceId: message.message_id,
-          title: `${message.sender_display_name || message.sender_id} · ${message.sent_at}`,
-          content: message.content,
-          metadata: {
-            senderId: message.sender_id,
-            replyTo: message.reply_to,
-          },
-        })),
-        ...context.existing_candidates.map((candidate) => ({
-          itemType: "memory_candidate",
-          referenceId: candidate.candidate_id,
-          title: `候选记忆 · ${candidate.attribution_status}`,
-          content: candidate.claim,
-          metadata: {
-            subjectId: candidate.subject_id,
-            sourceSpeakerId: candidate.source_speaker_id,
-            status: candidate.status,
-          },
-        })),
-      ];
+      const contextItems = projection?.contextItems ?? [];
       for (const [ordinal, item] of contextItems.entries()) {
         await tx`
           INSERT INTO llm_call_context_items (
@@ -499,7 +690,7 @@ export function createCognitionWorker({
               ${thought.confidenceMillis}, ${thought.risk}, ${thought.decision},
               ${thought.expiresAt}, ${request.promptVersion}, ${now}
             )
-            ON CONFLICT (idempotency_key) DO NOTHING
+            ON CONFLICT (thought_run_id) DO NOTHING
             RETURNING id
           `;
           if (inserted.length) {
@@ -621,62 +812,123 @@ export function createCognitionWorker({
 
   async function processConversation(run, conversation) {
     const context = await loadContext(run, conversation);
-    const request = cognitionRequest(run.job_type, context);
-    const thoughtRunId = await ensureThoughtRun(run, conversation, context);
+    const baseRequest = cognitionRequest(run.job_type, context);
+    const thoughtRun = await ensureThoughtRun(run, conversation, context);
     let configuration;
-    let result;
-    let callRecorded = false;
     try {
-      configuration = await loadProfile(request.profile);
+      configuration = await loadProfile(baseRequest.profile);
+      if (!configuration) {
+        throw new LlmConfigurationError(
+          "profile_missing",
+          `${baseRequest.profile} 模型尚未配置`,
+          503,
+        );
+      }
+      const persistent = await loadProjectionContext(
+        run,
+        conversation,
+        context,
+        thoughtRun,
+      );
+      const projection = projectThoughtContext({
+        systemMessages: [baseRequest.messages[0]],
+        compression: persistent.compression,
+        initializationHistory: persistent.initializationHistory,
+        committedTurns: persistent.committedTurns,
+        recalledMemories: persistent.recalledMemories,
+        newMessages: context.messages,
+        contextWindow: configuration.contextWindow,
+        reservedOutputTokens: baseRequest.maxOutputTokens,
+        reservedToolResultTokens: Math.max(
+          0,
+          Number(run.config?.reservedToolResultTokens ?? 1_024),
+        ),
+      });
       const provider = new OpenAiCompatibleProvider({
         fetchImpl,
         loadProfile: async () => configuration,
         timeoutMs: 60_000,
       });
-      result = await provider.complete(request);
-      await recordLlmCall({
-        run,
-        thoughtRunId,
-        context,
-        request,
-        configuration,
-        result,
-      });
-      callRecorded = true;
-      const output = parseStructuredOutput(result.content);
-      const persisted = await persistConversationResult({
-        run,
-        thoughtRunId,
-        context,
-        request,
-        output,
-        now: clock(),
-      });
-      return {
-        messageCount: context.messages.length,
-        llmCallCount: 1,
-        ...persisted,
+      const sourcePool = new Map([
+        ...persistent.initializationHistory,
+        ...persistent.committedTurns.flatMap((turn) => turn.newMessages),
+        ...context.messages,
+      ].map((message) => [message.message_id, message]));
+      const metrics = {
+        messageCount: 0,
+        llmCallCount: 0,
+        thoughtCount: 0,
+        candidateCount: 0,
       };
-    } catch (error) {
-      if (!callRecorded) {
-        await recordLlmCall({
-          run,
-          thoughtRunId,
-          context,
-          request,
-          configuration,
-          result,
-          error,
-        });
+      for (const chunk of projection.chunks) {
+        const request = {
+          ...baseRequest,
+          purpose: "primary",
+          messages: chunk.messages,
+        };
+        const projectedMessages = chunk.contextItems
+          .filter((item) => item.itemType === "message")
+          .map((item) => sourcePool.get(item.referenceId))
+          .filter(Boolean);
+        const chunkContext = { ...context, messages: projectedMessages };
+        let result;
+        let callRecorded = false;
+        try {
+          result = await provider.complete(request);
+          await recordLlmCall({
+            run,
+            thoughtRunId: thoughtRun.id,
+            context: chunkContext,
+            projection: chunk,
+            request,
+            configuration,
+            result,
+          });
+          callRecorded = true;
+          const output = parseStructuredOutput(result.content);
+          const persisted = await persistConversationResult({
+            run,
+            thoughtRunId: thoughtRun.id,
+            context: chunkContext,
+            request,
+            output,
+            now: clock(),
+          });
+          metrics.llmCallCount += 1;
+          metrics.messageCount += chunk.contextItems.filter(
+            (item) => item.itemType === "message" &&
+              item.metadata.section === "new_source",
+          ).length;
+          metrics.thoughtCount += persisted.thoughtCount;
+          metrics.candidateCount += persisted.candidateCount;
+        } catch (error) {
+          if (!callRecorded) {
+            await recordLlmCall({
+              run,
+              thoughtRunId: thoughtRun.id,
+              context: chunkContext,
+              projection: chunk,
+              request,
+              configuration,
+              result,
+              error,
+            });
+          }
+          throw error;
+        }
       }
+      return metrics;
+    } catch (error) {
       const failure = cognitionError(error);
       await sql`
         UPDATE thought_runs
         SET status = 'failed', processing_stage = 'failed',
             summary = ${failure.message}, completed_at = ${clock()}
-        WHERE id = ${thoughtRunId}
+        WHERE id = ${thoughtRun.id}
       `;
       throw error;
+    } finally {
+      await releaseThoughtStream(thoughtRun.id);
     }
   }
 

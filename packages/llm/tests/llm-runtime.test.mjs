@@ -121,6 +121,39 @@ test("DashScope JSON Object mode receives the exact schema with thinking disable
   assert.equal(calls[0].messages[1].content, "Return the requested result.");
 });
 
+test("OpenAI structured requests preserve the projected message array", async () => {
+  let requestBody;
+  const provider = new OpenAiCompatibleProvider({
+    loadProfile: async () => ({
+      enabled: true,
+      baseUrl: "https://api.openai.com/v1",
+      modelId: "test-model",
+      apiKey: "test-key",
+    }),
+    fetchImpl: async (_url, init) => {
+      requestBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"ok\":true}" } }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+  });
+  const messages = [
+    { role: "system", content: "stable" },
+    { role: "user", content: "actual projected context" },
+  ];
+  const result = await provider.complete({
+    profile: "fast",
+    messages,
+    responseSchema: {
+      type: "object",
+      required: ["ok"],
+      properties: { ok: { type: "boolean" } },
+    },
+  });
+  assert.deepEqual(requestBody.messages, messages);
+  assert.deepEqual(result.requestMessages, messages);
+});
+
 test("provider HTTP errors retain a redacted actionable detail", async () => {
   const provider = new OpenAiCompatibleProvider({
     loadProfile: async () => ({
