@@ -6,6 +6,11 @@ const snapshotUrl = new URL("../drizzle-pg/meta/0006_snapshot.json", import.meta
 const migrationUrl = new URL("../drizzle-pg/0006_glorious_rictor.sql", import.meta.url);
 const primarySnapshotUrl = new URL("../drizzle-pg/meta/0007_snapshot.json", import.meta.url);
 const primaryMigrationUrl = new URL("../drizzle-pg/0007_keen_gravity.sql", import.meta.url);
+const compilerSnapshotUrl = new URL("../drizzle-pg/meta/0008_snapshot.json", import.meta.url);
+const compilerMigrationUrl = new URL(
+  "../drizzle-pg/0008_lethal_radioactive_man.sql",
+  import.meta.url,
+);
 
 test("thought stream migration exposes the recoverable v2 contracts", async () => {
   const snapshot = JSON.parse(await readFile(snapshotUrl, "utf8"));
@@ -45,6 +50,19 @@ test("primary generation has immutable output and resumable chunk state", async 
   assert.equal(columns.primary_completed_at.notNull, false);
 
   const migration = await readFile(primaryMigrationUrl, "utf8");
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO)\s+"?thought_runs"?/i);
+});
+
+test("compiler and bounded revision checkpoints are persisted without backfill", async () => {
+  const snapshot = JSON.parse(await readFile(compilerSnapshotUrl, "utf8"));
+  const columns = snapshot.tables["public.thought_runs"].columns;
+  assert.equal(columns.compiler_state.notNull, true);
+  assert.equal(columns.compiler_attempt_count.notNull, true);
+  assert.equal(columns.revision_count.notNull, true);
+  assert.equal(columns.compiler_status.notNull, false);
+  assert.equal(columns.compiled_at.notNull, false);
+
+  const migration = await readFile(compilerMigrationUrl, "utf8");
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO)\s+"?thought_runs"?/i);
 });
 

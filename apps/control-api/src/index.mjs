@@ -383,9 +383,9 @@ async function getThoughtRunDetail(thoughtRunId) {
     LIMIT 1
   `;
   if (!runs[0]) throw new RequestError("thought_run_not_found", "思绪运行不存在", 404);
-  const [calls, outputs, candidates] = await Promise.all([
+  const [calls, outputs, candidates, proposals] = await Promise.all([
     sql`
-      SELECT call.id, call.sequence_number, call.profile, call.provider,
+      SELECT call.id, call.sequence_number, call.purpose, call.profile, call.provider,
              call.model, call.prompt_version, call.status, call.error_code,
              call.latency_ms, call.input_tokens, call.output_tokens,
              call.request_context, call.response_json, call.created_at,
@@ -424,8 +424,16 @@ async function getThoughtRunDetail(thoughtRunId) {
       WHERE thought_run_id = ${thoughtRunId}
       ORDER BY created_at
     `,
+    sql`
+      SELECT id, compiler_llm_call_id, ordinal, proposal_type, status,
+             idempotency_key, payload, evidence_references, policy_reasons,
+             created_at, updated_at
+      FROM action_proposals
+      WHERE thought_run_id = ${thoughtRunId}
+      ORDER BY ordinal
+    `,
   ]);
-  return { run: runs[0], calls, outputs, candidates };
+  return { run: runs[0], calls, outputs, candidates, proposals };
 }
 
 async function listMemoryCandidates() {

@@ -6,10 +6,10 @@
 
 当前 PostgreSQL 认知任务包括：
 
-- `thought_tick`：每 15 分钟检查各白名单 QQ 会话 watermark 后的新消息，由 primary 模型生成自然 Markdown 思绪；可进行有界的只读原生 tool-call 循环，完成后保存 immutable primary output，等待 fast compiler；
+- `thought_tick`：每 15 分钟检查各白名单 QQ 会话 watermark 后的新消息，由 primary 模型生成自然 Markdown 思绪并进行有界只读 tool-call 循环；fast 随后把原文编译为严格 reply/memory/task/no_action proposals，必要时最多要求两次 primary revision；
 - `memory_consolidation`：每天 03:00（Asia/Shanghai）由 primary 模型生成待审的 create/update/conflict 记忆候选。
 
-每个会话拥有独立 Thought Stream、Epoch、追加式 Turn 和 watermark。当前没有正式记忆召回、fast compiler、Agent 外发执行或上下文压缩；`recall_memories` 在 reviewed memory store 上线前明确返回空，不会把待审候选伪装成已召回记忆。
+每个会话拥有独立 Thought Stream、Epoch、追加式 Turn 和 watermark。accepted proposal、Turn 完成状态和 watermark 已原子提交，`no_action` 同样是成功结果。当前没有正式记忆召回、Agent 外发执行或上下文压缩；`recall_memories` 在 reviewed memory store 上线前明确返回空，不会把待审候选伪装成已召回记忆。
 
 ```text
 scheduler -> queued job_run -> worker lease + heartbeat
@@ -17,7 +17,8 @@ scheduler -> queued job_run -> worker lease + heartbeat
           -> one thought_run per conversation + Stream lease
           -> projected context chunks + primary natural LLM/tool loop
           -> immutable primary output + event
-          -> await fast compiler before proposal/watermark commit
+          -> fast strict compiler + bounded revision
+          -> proposals + Turn + watermark atomic commit
 ```
 
 ## Thought Stream v2
