@@ -30,6 +30,8 @@ Tests use Node's built-in runner and follow `<workspace>/tests/*.test.mjs`. Add 
 
 Create the issue and milestone first with `gh issue create` and `gh api`. Start standalone `feature/<issue>-<slug>` or `milestone/<slug>` branches from an updated `dev`. For milestone work, branch features from the milestone branch and open PRs back to that branch; standalone features target `dev`. After implementation, push and open a PR. Wait for all CI checks, then wait for the repository owner's explicit confirmation before merging.
 
+Run GitHub-facing `gh` operations outside the sandbox with elevated network access, including authentication checks, API calls, issue/PR operations, and CI checks. A sandboxed `gh auth status` may incorrectly report an invalid token; do not treat that result as the real authentication state.
+
 ## Commits & Pull Requests
 
 History is currently minimal, so use Conventional Commit subjects: `feat:`, `fix:`, `docs:`, `test:`, or `chore:`. Keep commits scoped and never include `Co-authored-by` trailers. PRs must include: linked issue/milestone, scope, implementation decisions and alternatives, verification commands/results, risks or rollback notes, and a reusable **Know-how** section. Include screenshots for UI changes. Do not merge your own PR without owner approval.
