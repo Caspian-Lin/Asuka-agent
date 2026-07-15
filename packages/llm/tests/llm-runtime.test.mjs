@@ -210,3 +210,52 @@ test("provider reports exhausted output budgets separately from malformed respon
     (error) => error.code === "provider_output_exhausted",
   );
 });
+
+test("provider forwards native read-only tools and accepts a tool-only assistant turn", async () => {
+  let requestBody;
+  const provider = new OpenAiCompatibleProvider({
+    loadProfile: async () => ({
+      enabled: true,
+      baseUrl: "https://models.example/v1",
+      modelId: "tool-model",
+      apiKey: "never-log-this",
+    }),
+    fetchImpl: async (_url, init) => {
+      requestBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        choices: [{
+          finish_reason: "tool_calls",
+          message: {
+            content: null,
+            tool_calls: [{
+              id: "call-1",
+              type: "function",
+              function: {
+                name: "search_conversation_messages",
+                arguments: "{\"query\":\"露营\",\"limit\":5}",
+              },
+            }],
+          },
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+  });
+  const tools = [{
+    type: "function",
+    function: {
+      name: "search_conversation_messages",
+      parameters: { type: "object" },
+    },
+  }];
+  const result = await provider.complete({
+    profile: "primary",
+    messages: [{ role: "user", content: "查一下" }],
+    tools,
+    toolChoice: "auto",
+  });
+  assert.deepEqual(requestBody.tools, tools);
+  assert.equal(requestBody.tool_choice, "auto");
+  assert.equal(result.content, "");
+  assert.equal(result.toolCalls[0].function.name, "search_conversation_messages");
+  assert.equal(result.finishReason, "tool_calls");
+});

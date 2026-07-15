@@ -15,6 +15,16 @@ import {
   ThoughtContextError,
 } from "@asuka-agent/agent-core/thought-context";
 import {
+  parsePrimaryToolCall,
+  PRIMARY_THOUGHT_PROMPT_VERSION,
+  PRIMARY_THOUGHT_SYSTEM_PROMPT,
+  PRIMARY_THOUGHT_TOOLS,
+  PrimaryThoughtError,
+  primaryThoughtRequest,
+  primaryToolCallKey,
+  runPrimaryToolLoop,
+} from "@asuka-agent/agent-core/primary-thought";
+import {
   decryptApiKey,
   LlmConfigurationError,
   OpenAiCompatibleProvider,
@@ -277,6 +287,17 @@ export function createCognitionWorker({
       WHERE c.agent_id = ${run.agent_id}
         AND c.channel = 'napcat'
         AND c.status = 'active'
+        AND (
+          ${run.job_type} <> 'thought_tick'
+          OR NOT EXISTS (
+            SELECT 1
+            FROM thought_runs AS pending_thought
+            WHERE pending_thought.agent_id = c.agent_id
+              AND pending_thought.conversation_id = c.id
+              AND pending_thought.status = 'primary_completed'
+              AND pending_thought.processing_stage = 'compiler'
+          )
+        )
         AND EXISTS (
           SELECT 1
           FROM messages AS message
@@ -437,7 +458,12 @@ export function createCognitionWorker({
       if (existing[0]) {
         await tx`
           UPDATE thought_runs
-          SET status = 'running', processing_stage = 'primary', completed_at = NULL,
+          SET status = CASE WHEN primary_output IS NULL THEN 'running' ELSE status END,
+              processing_stage = CASE
+                WHEN primary_output IS NULL THEN 'primary'
+                ELSE processing_stage
+              END,
+              completed_at = CASE WHEN primary_output IS NULL THEN NULL ELSE completed_at END,
               new_message_end_at = ${lastMessage.sent_at},
               new_message_end_id = ${lastMessage.message_id}
           WHERE id = ${existing[0].id}
@@ -593,6 +619,419 @@ export function createCognitionWorker({
     };
   }
 
+  async function executePrimaryTool(conversationId, toolCall) {
+    let parsed;
+    try {
+      parsed = parsePrimaryToolCall(toolCall);
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: error?.code ?? "invalid_tool_call",
+          message: errorMessage(error).slice(0, 300),
+        },
+      };
+    }
+    if (parsed.name === "recall_memories") {
+      return {
+        ok: true,
+        query: parsed.arguments.query,
+        memories: [],
+        notice: "Reviewed Agent-global memory store is not available in this MVP.",
+      };
+    }
+    if (parsed.name === "search_conversation_messages") {
+      const rows = await sql`
+        SELECT id, author_kind, sender_id, sender_display_name,
+               reply_to_external_message_id, content, created_at
+        FROM messages
+        WHERE conversation_id = ${conversationId}
+          AND content ILIKE ${`%${parsed.arguments.query}%`}
+        ORDER BY created_at DESC, id DESC
+        LIMIT ${parsed.arguments.limit}
+      `;
+      return {
+        ok: true,
+        query: parsed.arguments.query,
+        messages: rows.reverse().map((row) => ({
+          message_id: String(row.id),
+          author_kind: String(row.author_kind),
+          sender_id: row.sender_id == null ? null : String(row.sender_id),
+          sender_display_name: row.sender_display_name == null
+            ? null
+            : String(row.sender_display_name),
+          reply_to: row.reply_to_external_message_id == null
+            ? null
+            : String(row.reply_to_external_message_id),
+          sent_at: new Date(row.created_at).toISOString(),
+          content: String(row.content),
+        })),
+      };
+    }
+    const rows = await sql`
+      SELECT id, author_kind, sender_id, sender_display_name,
+             reply_to_external_message_id, content, created_at
+      FROM messages
+      WHERE conversation_id = ${conversationId}
+        AND id = ANY(${parsed.arguments.messageIds}::text[])
+    `;
+    const byId = new Map(rows.map((row) => [String(row.id), row]));
+    return {
+      ok: true,
+      messages: parsed.arguments.messageIds.flatMap((messageId) => {
+        const row = byId.get(messageId);
+        return row ? [{
+          message_id: messageId,
+          author_kind: String(row.author_kind),
+          sender_id: row.sender_id == null ? null : String(row.sender_id),
+          sender_display_name: row.sender_display_name == null
+            ? null
+            : String(row.sender_display_name),
+          reply_to: row.reply_to_external_message_id == null
+            ? null
+            : String(row.reply_to_external_message_id),
+          sent_at: new Date(row.created_at).toISOString(),
+          content: String(row.content),
+        }] : [];
+      }),
+      missingMessageIds: parsed.arguments.messageIds.filter((id) => !byId.has(id)),
+    };
+  }
+
+  async function ensurePrimaryToolResults({ run, thoughtRunId, llmCallId, toolCalls }) {
+    const messages = [];
+    for (const toolCall of toolCalls) {
+      const resultId = `tool-result:${stableHash({
+        llmCallId,
+        key: primaryToolCallKey(thoughtRunId, toolCall),
+      })}`;
+      let rows = await sql`
+        SELECT content, metadata
+        FROM llm_call_context_items
+        WHERE id = ${resultId}
+        LIMIT 1
+      `;
+      if (!rows[0]) {
+        await heartbeat(run.id);
+        const result = await executePrimaryTool(
+          run.conversation_id,
+          toolCall,
+        );
+        const content = JSON.stringify(result).slice(0, 20_000);
+        const parsed = (() => {
+          try {
+            return parsePrimaryToolCall(toolCall);
+          } catch {
+            return null;
+          }
+        })();
+        await sql.begin(async (tx) => {
+          const ordinals = await tx`
+            SELECT COALESCE(max(ordinal), -1)::int + 1 AS next_ordinal
+            FROM llm_call_context_items
+            WHERE llm_call_id = ${llmCallId}
+          `;
+          await tx`
+            INSERT INTO llm_call_context_items (
+              id, llm_call_id, ordinal, item_type, reference_id, title,
+              content, metadata, created_at
+            ) VALUES (
+              ${resultId}, ${llmCallId}, ${ordinals[0].next_ordinal},
+              'tool_result', ${toolCall.id},
+              ${`Tool result · ${toolCall.function.name}`}, ${content},
+              ${tx.json({
+                section: "tool_result",
+                toolCallId: toolCall.id,
+                toolName: toolCall.function.name,
+                arguments: parsed?.arguments ?? null,
+                ok: result.ok === true,
+              })}, ${clock()}
+            )
+            ON CONFLICT (id) DO NOTHING
+          `;
+        });
+        rows = await sql`
+          SELECT content, metadata
+          FROM llm_call_context_items
+          WHERE id = ${resultId}
+          LIMIT 1
+        `;
+      }
+      messages.push({
+        role: "tool",
+        tool_call_id: String(toolCall.id),
+        name: String(toolCall.function.name),
+        content: String(rows[0].content),
+      });
+    }
+    return messages;
+  }
+
+  async function primaryCallHistory(thoughtRunId) {
+    const rows = await sql`
+      SELECT id, request_context, response_json, input_tokens, output_tokens,
+             sequence_number
+      FROM llm_calls
+      WHERE thought_run_id = ${thoughtRunId}
+        AND purpose IN ('primary', 'tool_continuation')
+        AND status = 'succeeded'
+      ORDER BY sequence_number
+    `;
+    return rows.map((row) => ({
+      id: String(row.id),
+      requestContext: row.request_context,
+      response: row.response_json ?? {},
+      inputTokens: Number(row.input_tokens ?? 0),
+      outputTokens: Number(row.output_tokens ?? 0),
+      sequenceNumber: Number(row.sequence_number),
+    }));
+  }
+
+  async function loadPrimaryState(thoughtRunId) {
+    const rows = await sql`
+      SELECT primary_state, primary_output, primary_output_hash,
+             primary_stop_reason, started_at
+      FROM thought_runs
+      WHERE id = ${thoughtRunId}
+      LIMIT 1
+    `;
+    const row = rows[0];
+    return {
+      state: row?.primary_state && typeof row.primary_state === "object"
+        ? row.primary_state
+        : {},
+      output: row?.primary_output == null ? null : String(row.primary_output),
+      outputHash: row?.primary_output_hash == null ? null : String(row.primary_output_hash),
+      stopReason: row?.primary_stop_reason == null ? null : String(row.primary_stop_reason),
+      startedAt: row?.started_at ? new Date(row.started_at) : clock(),
+    };
+  }
+
+  async function savePrimaryChunk(thoughtRunId, chunkIndex, output) {
+    const now = clock();
+    await sql.begin(async (tx) => {
+      const rows = await tx`
+        SELECT primary_state
+        FROM thought_runs
+        WHERE id = ${thoughtRunId}
+        FOR UPDATE
+      `;
+      const state = rows[0]?.primary_state && typeof rows[0].primary_state === "object"
+        ? rows[0].primary_state
+        : {};
+      const completedChunks = Array.isArray(state.completedChunks)
+        ? [...state.completedChunks]
+        : [];
+      const existing = completedChunks.find((chunk) => chunk.chunkIndex === chunkIndex);
+      const outputHash = stableHash(output);
+      if (existing && existing.outputHash !== outputHash) {
+        throw new CognitionValidationError(
+          "primary_output_conflict",
+          "已保存的 primary chunk 与本次结果不一致",
+        );
+      }
+      if (!existing) {
+        completedChunks.push({ chunkIndex, output, outputHash, completedAt: now.toISOString() });
+        completedChunks.sort((left, right) => left.chunkIndex - right.chunkIndex);
+      }
+      await tx`
+        UPDATE thought_runs
+        SET primary_state = ${tx.json({ ...state, completedChunks })}
+        WHERE id = ${thoughtRunId}
+      `;
+    });
+  }
+
+  function assistantToolMessage(result) {
+    return {
+      role: "assistant",
+      content: result.content || null,
+      tool_calls: result.toolCalls,
+    };
+  }
+
+  async function stopPrimary(thoughtRunId, code, message) {
+    await sql`
+      UPDATE thought_runs
+      SET primary_stop_reason = ${code}, status = 'failed',
+          processing_stage = 'failed', summary = ${message}, completed_at = ${clock()}
+      WHERE id = ${thoughtRunId}
+    `;
+    throw new CognitionValidationError(code, message);
+  }
+
+  async function executePrimaryChunk({
+    run,
+    thoughtRun,
+    chunk,
+    chunkCount,
+    initialMessages,
+    provider,
+    configuration,
+    projection,
+    limits,
+    activeStartedAt,
+  }) {
+    const calls = await primaryCallHistory(thoughtRun.id);
+    const chunkCalls = calls.filter((call) => (
+      Number(call.response?.metadata?.chunkIndex) === chunk.chunkIndex
+    ));
+    const latest = chunkCalls.at(-1);
+    if (latest && !(latest.response.toolCalls?.length) &&
+        typeof latest.response.content === "string" && latest.response.content.trim()) {
+      return { output: latest.response.content.trim(), callsCreated: 0 };
+    }
+    let messages = initialMessages;
+    let purpose = "primary";
+    if (latest?.response?.toolCalls?.length) {
+      const toolMessages = await ensurePrimaryToolResults({
+        run: { ...run, conversation_id: projection.conversationId },
+        thoughtRunId: thoughtRun.id,
+        llmCallId: latest.id,
+        toolCalls: latest.response.toolCalls,
+      });
+      messages = [
+        ...latest.requestContext,
+        assistantToolMessage(latest.response),
+        ...toolMessages,
+      ];
+      purpose = "tool_continuation";
+    }
+    try {
+      return await runPrimaryToolLoop({
+        initialMessages: messages,
+        initialPurpose: purpose,
+        limits,
+        readUsage: async () => {
+          const history = await primaryCallHistory(thoughtRun.id);
+          return {
+            rounds: history.length,
+            tokens: history.reduce(
+              (total, call) => total + call.inputTokens + call.outputTokens,
+              0,
+            ),
+            toolCalls: history.reduce(
+              (total, call) => total + (call.response.toolCalls?.length ?? 0),
+              0,
+            ),
+          };
+        },
+        elapsedMs: () => performance.now() - activeStartedAt,
+        invokeModel: async ({ messages: roundMessages, purpose: roundPurpose, round }) => {
+          await heartbeat(run.id);
+          const request = {
+            ...primaryThoughtRequest(roundMessages),
+            purpose: roundPurpose,
+          };
+          let result;
+          let callRecorded = false;
+          try {
+            result = await provider.complete(request);
+            const llmCallId = await recordLlmCall({
+              run,
+              thoughtRunId: thoughtRun.id,
+              context: projection.context,
+              projection: chunk,
+              request,
+              configuration,
+              result,
+              responseMetadata: {
+                chunkIndex: chunk.chunkIndex,
+                chunkCount,
+                round,
+              },
+            });
+            callRecorded = true;
+            return { result, llmCallId };
+          } catch (error) {
+            if (!callRecorded) {
+              await recordLlmCall({
+                run,
+                thoughtRunId: thoughtRun.id,
+                context: projection.context,
+                projection: chunk,
+                request,
+                configuration,
+                result,
+                error,
+                responseMetadata: {
+                  chunkIndex: chunk.chunkIndex,
+                  chunkCount,
+                  round,
+                },
+              });
+            }
+            throw error;
+          }
+        },
+        executeTools: ({ llmCallId, toolCalls }) => ensurePrimaryToolResults({
+          run: { ...run, conversation_id: projection.conversationId },
+          thoughtRunId: thoughtRun.id,
+          llmCallId,
+          toolCalls,
+        }),
+      });
+    } catch (error) {
+      if (error instanceof PrimaryThoughtError && error.code.startsWith("primary_")) {
+        return stopPrimary(thoughtRun.id, error.code, error.message);
+      }
+      throw error;
+    }
+  }
+
+  async function finalizePrimary(run, thoughtRunId, conversationId, outputs) {
+    const output = outputs.length === 1
+      ? outputs[0]
+      : outputs.map((part, index) => (
+          `## Input chunk ${index + 1}/${outputs.length}\n\n${part}`
+        )).join("\n\n---\n\n");
+    const outputHash = stableHash(output);
+    const now = clock();
+    await sql.begin(async (tx) => {
+      const rows = await tx`
+        SELECT primary_output_hash
+        FROM thought_runs
+        WHERE id = ${thoughtRunId}
+        FOR UPDATE
+      `;
+      if (rows[0]?.primary_output_hash && rows[0].primary_output_hash !== outputHash) {
+        throw new CognitionValidationError(
+          "primary_output_conflict",
+          "immutable primary output 已存在且内容不一致",
+        );
+      }
+      await tx`
+        UPDATE thought_runs
+        SET primary_output = COALESCE(primary_output, ${output}),
+            primary_output_hash = COALESCE(primary_output_hash, ${outputHash}),
+            primary_prompt_version = ${PRIMARY_THOUGHT_PROMPT_VERSION},
+            primary_stop_reason = 'completed', primary_completed_at = ${now},
+            status = 'primary_completed', processing_stage = 'compiler',
+            summary = ${output.replace(/\s+/g, " ").slice(0, 300)},
+            completed_at = ${now}
+        WHERE id = ${thoughtRunId}
+      `;
+      await tx`
+        INSERT INTO events (
+          id, conversation_id, event_type, source_type, payload_json,
+          correlation_id, created_at
+        ) VALUES (
+          ${`event:primary-thought:${thoughtRunId}`}, ${conversationId},
+          'primary_thought_completed', 'agent',
+          ${tx.json({
+            thoughtRunId,
+            jobRunId: run.id,
+            promptVersion: PRIMARY_THOUGHT_PROMPT_VERSION,
+            outputHash,
+            chunkCount: outputs.length,
+          })}, ${run.correlation_id}, ${now}
+        )
+        ON CONFLICT (id) DO NOTHING
+      `;
+    });
+    return output;
+  }
+
   async function recordLlmCall({
     run,
     thoughtRunId,
@@ -602,6 +1041,7 @@ export function createCognitionWorker({
     configuration,
     result,
     error,
+    responseMetadata = {},
   }) {
     const failure = error ? cognitionError(error) : null;
     const now = clock();
@@ -637,10 +1077,27 @@ export function createCognitionWorker({
           ${result?.outputTokens ?? null}, ${sequenceRows[0].next_sequence},
           ${request.purpose ?? "primary"},
           ${tx.json(requestMessages)},
-          ${result ? tx.json({ content: result.content }) : null}, ${now}
+          ${result ? tx.json({
+            content: result.content,
+            toolCalls: result.toolCalls ?? [],
+            finishReason: result.finishReason ?? null,
+            metadata: responseMetadata,
+          }) : null}, ${now}
         )
       `;
-      const contextItems = projection?.contextItems ?? [];
+      const contextItems = [
+        ...(projection?.contextItems ?? []),
+        ...(request.tools ?? []).map((tool) => ({
+          itemType: "tool_definition",
+          referenceId: tool.function.name,
+          title: `Read-only tool · ${tool.function.name}`,
+          content: tool.function.description,
+          metadata: {
+            section: "tools",
+            schema: tool.function.parameters,
+          },
+        })),
+      ];
       for (const [ordinal, item] of contextItems.entries()) {
         await tx`
           INSERT INTO llm_call_context_items (
@@ -812,7 +1269,10 @@ export function createCognitionWorker({
 
   async function processConversation(run, conversation) {
     const context = await loadContext(run, conversation);
-    const baseRequest = cognitionRequest(run.job_type, context);
+    const isPrimaryThought = run.job_type === "thought_tick";
+    const baseRequest = isPrimaryThought
+      ? primaryThoughtRequest([{ role: "system", content: PRIMARY_THOUGHT_SYSTEM_PROMPT }])
+      : cognitionRequest(run.job_type, context);
     const thoughtRun = await ensureThoughtRun(run, conversation, context);
     let configuration;
     try {
@@ -823,6 +1283,17 @@ export function createCognitionWorker({
           `${baseRequest.profile} 模型尚未配置`,
           503,
         );
+      }
+      if (isPrimaryThought) {
+        const saved = await loadPrimaryState(thoughtRun.id);
+        if (saved.output) {
+          return {
+            messageCount: context.messages.length,
+            llmCallCount: 0,
+            thoughtCount: 1,
+            candidateCount: 0,
+          };
+        }
       }
       const persistent = await loadProjectionContext(
         run,
@@ -837,6 +1308,7 @@ export function createCognitionWorker({
         committedTurns: persistent.committedTurns,
         recalledMemories: persistent.recalledMemories,
         newMessages: context.messages,
+        tools: isPrimaryThought ? PRIMARY_THOUGHT_TOOLS : [],
         contextWindow: configuration.contextWindow,
         reservedOutputTokens: baseRequest.maxOutputTokens,
         reservedToolResultTokens: Math.max(
@@ -860,6 +1332,97 @@ export function createCognitionWorker({
         thoughtCount: 0,
         candidateCount: 0,
       };
+      if (isPrimaryThought) {
+        const saved = await loadPrimaryState(thoughtRun.id);
+        const completedChunks = new Map(
+          (Array.isArray(saved.state.completedChunks)
+            ? saved.state.completedChunks
+            : []).map((chunk) => [Number(chunk.chunkIndex), String(chunk.output)]),
+        );
+        const outputs = [];
+        const activeStartedAt = performance.now();
+        const configuredRounds = Number(
+          run.config?.maxPrimaryRounds ?? projection.chunks.length + 4,
+        );
+        const configuredTokens = Number(
+          run.config?.maxPrimaryTokens ?? configuration.contextWindow * 2,
+        );
+        const configuredToolCalls = Number(run.config?.maxPrimaryToolCalls ?? 8);
+        const configuredActiveMs = Number(run.config?.maxPrimaryActiveMs ?? 120_000);
+        const limits = {
+          maxRounds: Math.min(
+            30,
+            Math.max(projection.chunks.length, Number.isSafeInteger(configuredRounds)
+              ? configuredRounds
+              : projection.chunks.length + 4),
+          ),
+          maxTokens: Math.min(
+            4_000_000,
+            Math.max(configuration.contextWindow, Number.isSafeInteger(configuredTokens)
+              ? configuredTokens
+              : configuration.contextWindow * 2),
+          ),
+          maxToolCalls: Math.min(
+            30,
+            Math.max(0, Number.isSafeInteger(configuredToolCalls) ? configuredToolCalls : 8),
+          ),
+          maxActiveMs: Math.min(
+            10 * 60_000,
+            Math.max(5_000, Number.isSafeInteger(configuredActiveMs)
+              ? configuredActiveMs
+              : 120_000),
+          ),
+        };
+        for (const chunk of projection.chunks) {
+          const projectedMessages = chunk.contextItems
+            .filter((item) => item.itemType === "message")
+            .map((item) => sourcePool.get(item.referenceId))
+            .filter(Boolean);
+          const chunkContext = { ...context, messages: projectedMessages };
+          const savedOutput = completedChunks.get(chunk.chunkIndex);
+          if (savedOutput) {
+            outputs.push(savedOutput);
+            continue;
+          }
+          const newSourceCount = chunk.contextItems.filter(
+            (item) => item.itemType === "message" &&
+              item.metadata.section === "new_source",
+          ).length;
+          const prefixLength = chunk.messages.length - newSourceCount;
+          const initialMessages = [
+            ...chunk.messages.slice(0, prefixLength),
+            ...outputs.map((output) => ({ role: "assistant", content: output })),
+            ...chunk.messages.slice(prefixLength),
+          ];
+          const result = await executePrimaryChunk({
+            run,
+            thoughtRun,
+            chunk,
+            chunkCount: projection.chunks.length,
+            initialMessages,
+            provider,
+            configuration,
+            projection: {
+              context: chunkContext,
+              conversationId: context.conversation.conversation_id,
+            },
+            limits,
+            activeStartedAt,
+          });
+          await savePrimaryChunk(thoughtRun.id, chunk.chunkIndex, result.output);
+          outputs.push(result.output);
+          metrics.llmCallCount += result.callsCreated;
+        }
+        await finalizePrimary(
+          run,
+          thoughtRun.id,
+          context.conversation.conversation_id,
+          outputs,
+        );
+        metrics.messageCount = context.messages.length;
+        metrics.thoughtCount = 1;
+        return metrics;
+      }
       for (const chunk of projection.chunks) {
         const request = {
           ...baseRequest,

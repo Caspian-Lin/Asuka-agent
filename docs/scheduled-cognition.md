@@ -1,23 +1,23 @@
 # Scheduled Cognition
 
-本文定义 Asuka Agent 的定时认知运行协议。当前 Issue #3 已跑通单轮 MVP；下一阶段按本文的 **Thought Stream v2** 演进。目标设计不等于当前已实现能力。
+本文定义 Asuka Agent 的定时认知运行协议。Issue #3 的单轮 MVP 已演进到会话隔离的 **Thought Stream v2**；各小节会明确已实现边界与仍待完成的执行阶段。
 
 ## 当前实现
 
 当前 PostgreSQL 认知任务包括：
 
-- `thought_tick`：每 15 分钟检查各白名单 QQ 会话 watermark 后的新消息，由 fast 模型单次生成严格 JSON，至多形成一条 Operational Thought；
+- `thought_tick`：每 15 分钟检查各白名单 QQ 会话 watermark 后的新消息，由 primary 模型生成自然 Markdown 思绪；可进行有界的只读原生 tool-call 循环，完成后保存 immutable primary output，等待 fast compiler；
 - `memory_consolidation`：每天 03:00（Asia/Shanghai）由 primary 模型生成待审的 create/update/conflict 记忆候选。
 
-每个有新消息的会话拥有独立 `thought_run` 和 watermark，但不同触发之间没有持续的短期上下文。当前也没有正式记忆召回、工具循环、Agent 自己的外发消息历史或上下文压缩。
+每个会话拥有独立 Thought Stream、Epoch、追加式 Turn 和 watermark。当前没有正式记忆召回、fast compiler、Agent 外发执行或上下文压缩；`recall_memories` 在 reviewed memory store 上线前明确返回空，不会把待审候选伪装成已召回记忆。
 
 ```text
 scheduler -> queued job_run -> worker lease + heartbeat
           -> messages after per-conversation watermark
-          -> one thought_run per conversation
-          -> one structured LLM call
-          -> deterministic identity/evidence validation
-          -> result + event + watermark in one transaction
+          -> one thought_run per conversation + Stream lease
+          -> projected context chunks + primary natural LLM/tool loop
+          -> immutable primary output + event
+          -> await fast compiler before proposal/watermark commit
 ```
 
 ## Thought Stream v2

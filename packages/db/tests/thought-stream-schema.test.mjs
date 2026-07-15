@@ -4,6 +4,8 @@ import test from "node:test";
 
 const snapshotUrl = new URL("../drizzle-pg/meta/0006_snapshot.json", import.meta.url);
 const migrationUrl = new URL("../drizzle-pg/0006_glorious_rictor.sql", import.meta.url);
+const primarySnapshotUrl = new URL("../drizzle-pg/meta/0007_snapshot.json", import.meta.url);
+const primaryMigrationUrl = new URL("../drizzle-pg/0007_keen_gravity.sql", import.meta.url);
 
 test("thought stream migration exposes the recoverable v2 contracts", async () => {
   const snapshot = JSON.parse(await readFile(snapshotUrl, "utf8"));
@@ -30,6 +32,20 @@ test("thought stream migration exposes the recoverable v2 contracts", async () =
   assert.equal(tables["public.messages"].columns.author_kind.notNull, true);
   assert.equal(tables["public.messages"].columns.direction.notNull, true);
   assert.equal(tables["public.llm_calls"].columns.purpose.notNull, true);
+});
+
+test("primary generation has immutable output and resumable chunk state", async () => {
+  const snapshot = JSON.parse(await readFile(primarySnapshotUrl, "utf8"));
+  const columns = snapshot.tables["public.thought_runs"].columns;
+  assert.equal(columns.primary_state.notNull, true);
+  assert.equal(columns.primary_output.notNull, false);
+  assert.equal(columns.primary_output_hash.notNull, false);
+  assert.equal(columns.primary_prompt_version.notNull, false);
+  assert.equal(columns.primary_stop_reason.notNull, false);
+  assert.equal(columns.primary_completed_at.notNull, false);
+
+  const migration = await readFile(primaryMigrationUrl, "utf8");
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO)\s+"?thought_runs"?/i);
 });
 
 test("internal-development migration does not backfill legacy test rows", async () => {
