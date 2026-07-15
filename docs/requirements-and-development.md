@@ -1,10 +1,10 @@
 # Asuka Agent：需求与开发设计文档
 
-> 文档版本：0.2.0（Phase 2 IM/调度控制面首个切片）
+> 文档版本：0.2.1（Phase 2 Monorepo 基础）
 >
 > 更新时间：2026-07-15
 >
-> 状态：第一阶段已实现；NapCat QQ 入站、IM Channel 与任务控制面已进入本地验证
+> 状态：第一阶段已实现；NapCat QQ 入站、IM Channel、任务控制面与 Monorepo 基础已进入本地验证
 >
 > 配套实现：`Asuka Agent`
 
@@ -275,26 +275,25 @@ sequenceDiagram
 ### 7.3 目录结构
 
 ```text
-app/
-  api/                    HTTP API
-  components/             客户端控制台、IM Channel 与任务页面
-  globals.css             设计系统与响应式布局
-db/
-  schema.ts               Drizzle 领域 schema
-  postgres/schema.ts      PostgreSQL IM 与调度 schema
-  runtime.ts              D1 首次运行建表
-drizzle/                  版本化 SQL migration
-drizzle-pg/               PostgreSQL 版本化 SQL migration
-lib/
-  agent-core.ts           纯函数：token、检索、候选、思绪、回复
-  napcat-ingress.mjs      QQ 群白名单与事件标准化纯函数
-  server/agent-service.ts  事务编排与持久化
-services/                 NapCat gateway、持续 worker、控制 API
+apps/
+  web/                    Vinext UI、Route Handlers、Cloudflare Worker
+  control-api/            PostgreSQL 查询与控制面
+  napcat-gateway/         OneBot WebSocket adapter
+  agent-worker/           入站投影与后续调度执行器
+packages/
+  agent-core/             纯领域策略：检索、候选、思绪、回复
+  db/                     D1/PostgreSQL schema、migration、数据库脚本
+  im/                     QQ/OneBot 消息标准化
+  config/                 进程环境变量解析与校验
+  llm/                    primary/fast LLM adapter 契约
+  shared/                 稳定通用代码
 docs/
   requirements-and-development.md
   schemas/                可机读 schema 与 seed
-tests/                    领域与渲染测试
+scripts/                  根级构建、安装和 workspace 边界检查
 ```
+
+根目录只负责编排，使用一个 `package-lock.json`。Workspace 间仅通过声明过的 `@asuka-agent/*` 公开 exports 依赖；相对路径越界、私有子路径和循环依赖由 `make check` 阻止。数据库结构与 migration 由 `packages/db` 唯一所有。
 
 ## 8. 数据设计
 
@@ -843,12 +842,14 @@ make dev
 
 ```bash
 make lint
+make typecheck
+make boundaries
 make db-generate
 make db-check
 make test
 ```
 
-`db:generate` 在修改 `db/schema.ts` 后执行，并检查生成的 SQL 是否只包含预期变更。
+`db:generate` 在修改 `packages/db/src/postgres/schema.ts` 后执行，并检查生成的 SQL 是否只包含预期变更。D1 与 PostgreSQL migration 分别位于 `packages/db/drizzle-d1` 和 `packages/db/drizzle-pg`。
 
 ### 17.3 新增真实模型 adapter
 

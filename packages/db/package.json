@@ -1,0 +1,25 @@
+{
+  "name": "@asuka-agent/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./d1": "./src/d1/index.ts",
+    "./d1/runtime": "./src/d1/runtime.ts",
+    "./d1/schema": "./src/d1/schema.ts",
+    "./postgres/schema": "./src/postgres/schema.ts"
+  },
+  "scripts": {
+    "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
+    "db:check": "drizzle-kit check --config=drizzle.config.ts",
+    "db:migrate": "node --env-file=../../.env scripts/migrate.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "drizzle-orm": "0.45.2",
+    "postgres": "3.4.7"
+  },
+  "devDependencies": {
+    "drizzle-kit": "0.31.10"
+  }
+}

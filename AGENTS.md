@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`app/` contains the Vinext/React UI and routes. Shared logic lives in `lib/`; server orchestration belongs in `lib/server/`. NapCat processes are under `services/`, and the Cloudflare entry point is `worker/`. Schemas live in `db/`; D1 and PostgreSQL migrations are in `drizzle/` and `drizzle-pg/`. Tests use `tests/`, assets `public/`, and scripts `scripts/`. Treat `docs/requirements-and-development.md` as the core product and architecture reference; review it before changes and keep it current.
+Runnable processes live in `apps/`: `web`, `control-api`, `napcat-gateway`, and `agent-worker`. Reusable code belongs in `packages/`: `agent-core`, `db`, `im`, `config`, `llm`, and `shared`. Tests live with their workspace. PostgreSQL and D1 schemas/migrations are owned only by `packages/db/`. Root `scripts/` and `Makefile` orchestrate workspaces. Treat `docs/requirements-and-development.md` as the core product and architecture reference; review it before changes.
 
 ## Build, Test, and Development Commands
 
@@ -12,7 +12,7 @@
 - `make worker`: process one batch of newly persisted QQ messages.
 - `make db-generate`: generate a migration for review; never change tables manually.
 - `make db-migrate`: apply reviewed PostgreSQL migrations from `.env`.
-- `make check`: run ESLint and fast unit tests.
+- `make check`: run lint, typecheck, boundary checks, and unit tests.
 - `make test`: build and run the complete test suite.
 - `make build`: create and validate the production artifact.
 
@@ -20,9 +20,11 @@
 
 Use TypeScript/ES modules, two-space indentation, semicolons, and existing ESLint rules. Use `camelCase` for values/functions, `PascalCase` for components/types, and descriptive kebab-case filenames. Keep credentials in ignored `.env` files; document variables in `.env.example`.
 
+Import another workspace only through its `@asuka-agent/*` public exports; never traverse package boundaries with relative paths.
+
 ## Testing Guidelines
 
-Tests use Node's built-in runner and follow `tests/*.test.mjs`. Add regression tests for behavioral changes, especially ingestion idempotency and agent decisions. Run `make check` before every PR and `make test` before merge. No numeric coverage threshold exists; cover success and important failure paths.
+Tests use Node's built-in runner and follow `<workspace>/tests/*.test.mjs`. Add regression tests for behavioral changes, especially ingestion idempotency and agent decisions. `make check` includes lint, typecheck, workspace-boundary validation, and unit tests. Run it before every PR and `make test` before merge. No numeric coverage threshold exists; cover success and important failure paths.
 
 ## Standard Development Workflow
 
