@@ -54,4 +54,4 @@ NapCat WS
 - `POST http://127.0.0.1:3002/api/im/read`
 - `GET http://127.0.0.1:3002/api/jobs`
 
-所有 PostgreSQL 结构变更必须先修改 `db/postgres/schema.ts`，生成并审阅 `drizzle-pg/*.sql`，再运行 `make db-migrate`。禁止应用启动时建表或手工修改数据库结构。
+所有 PostgreSQL 结构变更必须先修改 `packages/db/src/postgres/schema.ts`，生成并审阅 `packages/db/drizzle-pg/*.sql`，再运行 `make db-migrate`。禁止应用启动时建表或手工修改数据库结构。

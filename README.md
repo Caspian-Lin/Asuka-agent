@@ -42,21 +42,25 @@ make backend      # 仅三个后端进程
 make worker       # 手动处理一批入站消息
 make db-generate  # 生成 migration，必须审阅 SQL
 make db-migrate   # 应用已审阅 migration
-make check        # ESLint + 单元测试
+make check        # ESLint + typecheck + workspace 边界 + 单元测试
 make test         # 构建 + 完整测试
 ```
 
 ## 主要目录
 
 ```text
-app/                    Web UI 与 D1 Route Handlers
-db/postgres/            PostgreSQL Drizzle schema
-drizzle-pg/             PostgreSQL migrations
-services/               NapCat gateway、worker、control API
-lib/                    Agent 与入站纯函数
-tests/                  Node 测试
-docs/                   核心需求、设计与接入文档
+apps/web/                    Vinext UI、D1 Route Handlers 与 Worker 入口
+apps/control-api/            PostgreSQL 控制面 API
+apps/napcat-gateway/         NapCat OneBot WebSocket adapter
+apps/agent-worker/           入站投影与后续调度 Worker
+packages/agent-core/         无运行时依赖的 Agent 领域策略
+packages/db/                 D1/PostgreSQL schema、migration 与数据库脚本
+packages/im/                 IM/OneBot 消息标准化
+packages/config|llm|shared/  配置、模型契约与稳定通用代码
+docs/                        核心需求、设计与接入文档
 ```
+
+仓库使用单一根 `package-lock.json`。Workspace 间只能通过 `@asuka-agent/*` 的公开 `exports` 导入；`npm run check:boundaries` 会拒绝跨包相对导入、未声明依赖、私有子路径和循环依赖。
 
 核心参考是 [`docs/requirements-and-development.md`](docs/requirements-and-development.md)，NapCat 配置和排错见 [`docs/qq-ingress.md`](docs/qq-ingress.md)。
 

@@ -1,0 +1,12 @@
+{
+  "name": "@asuka-agent/im",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/napcat-ingress.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  }
+}

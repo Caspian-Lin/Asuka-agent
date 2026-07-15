@@ -1,0 +1,15 @@
+{
+  "name": "@asuka-agent/agent-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=../../.env src/index.mjs --watch",
+    "once": "node --env-file=../../.env src/index.mjs"
+  },
+  "dependencies": {
+    "@asuka-agent/config": "0.1.0",
+    "@asuka-agent/shared": "0.1.0",
+    "postgres": "3.4.7"
+  }
+}
