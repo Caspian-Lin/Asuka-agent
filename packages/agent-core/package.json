@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./action-compiler": "./src/action-compiler.mjs",
     "./primary-thought": "./src/primary-thought.mjs",
     "./scheduled-cognition": "./src/scheduled-cognition.mjs",
     "./thought-context": "./src/thought-context.mjs"

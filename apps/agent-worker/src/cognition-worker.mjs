@@ -25,6 +25,17 @@ import {
   runPrimaryToolLoop,
 } from "@asuka-agent/agent-core/primary-thought";
 import {
+  ActionCompilerError,
+  ACTION_COMPILER_PROMPT_VERSION,
+  actionCompilerRequest,
+  actionProposalIdempotencyKey,
+  buildCompilerInput,
+  parseActionCompilerContent,
+  primaryRevisionRequest,
+  selectReusableCompilerCall,
+  validateCompilerOutput,
+} from "@asuka-agent/agent-core/action-compiler";
+import {
   decryptApiKey,
   LlmConfigurationError,
   OpenAiCompatibleProvider,
@@ -68,6 +79,9 @@ export function cognitionError(error) {
   }
   if (error instanceof ThoughtContextError) {
     return { code: error.code, message: error.message, retryable: false };
+  }
+  if (error instanceof ActionCompilerError) {
+    return { code: error.code, message: error.message, retryable: error.retryable };
   }
   if (error instanceof LlmConfigurationError) {
     const retryable = error.code === "provider_timeout" ||
@@ -287,17 +301,6 @@ export function createCognitionWorker({
       WHERE c.agent_id = ${run.agent_id}
         AND c.channel = 'napcat'
         AND c.status = 'active'
-        AND (
-          ${run.job_type} <> 'thought_tick'
-          OR NOT EXISTS (
-            SELECT 1
-            FROM thought_runs AS pending_thought
-            WHERE pending_thought.agent_id = c.agent_id
-              AND pending_thought.conversation_id = c.id
-              AND pending_thought.status = 'primary_completed'
-              AND pending_thought.processing_stage = 'compiler'
-          )
-        )
         AND EXISTS (
           SELECT 1
           FROM messages AS message
@@ -450,7 +453,8 @@ export function createCognitionWorker({
         ON CONFLICT (stream_id, ordinal) DO NOTHING
       `;
       const existing = await tx`
-        SELECT id, stream_id, epoch_id, turn_ordinal
+        SELECT id, conversation_id, stream_id, epoch_id, turn_ordinal,
+               new_message_end_at, new_message_end_id, primary_output
         FROM thought_runs
         WHERE job_run_id = ${run.id} AND conversation_id = ${conversation.id}
         LIMIT 1
@@ -464,8 +468,14 @@ export function createCognitionWorker({
                 ELSE processing_stage
               END,
               completed_at = CASE WHEN primary_output IS NULL THEN NULL ELSE completed_at END,
-              new_message_end_at = ${lastMessage.sent_at},
-              new_message_end_id = ${lastMessage.message_id}
+              new_message_end_at = CASE
+                WHEN primary_output IS NULL THEN ${lastMessage.sent_at}
+                ELSE new_message_end_at
+              END,
+              new_message_end_id = CASE
+                WHEN primary_output IS NULL THEN ${lastMessage.message_id}
+                ELSE new_message_end_id
+              END
           WHERE id = ${existing[0].id}
         `;
         return {
@@ -473,6 +483,13 @@ export function createCognitionWorker({
           streamId: existing[0].stream_id,
           epochId: existing[0].epoch_id,
           turnOrdinal: Number(existing[0].turn_ordinal),
+          conversationId: existing[0].conversation_id,
+          newMessageEndAt: existing[0].primary_output == null
+            ? lastMessage.sent_at
+            : existing[0].new_message_end_at,
+          newMessageEndId: existing[0].primary_output == null
+            ? lastMessage.message_id
+            : existing[0].new_message_end_id,
         };
       }
       const ordinals = await tx`
@@ -500,6 +517,9 @@ export function createCognitionWorker({
         streamId: stream.id,
         epochId,
         turnOrdinal: Number(ordinals[0].next_ordinal),
+        conversationId: conversation.id,
+        newMessageEndAt: lastMessage.sent_at,
+        newMessageEndId: lastMessage.message_id,
       };
     });
   }
@@ -1032,6 +1052,520 @@ export function createCognitionWorker({
     return output;
   }
 
+  async function loadCompilerReferences(thoughtRunId) {
+    const rows = await sql`
+      SELECT item.item_type, item.reference_id, item.content, item.metadata
+      FROM llm_call_context_items AS item
+      JOIN llm_calls AS call ON call.id = item.llm_call_id
+      WHERE call.thought_run_id = ${thoughtRunId}
+        AND item.item_type IN ('message', 'memory', 'tool_result', 'external_source')
+      ORDER BY call.sequence_number, item.ordinal
+    `;
+    const references = [];
+    for (const row of rows) {
+      const metadata = row.metadata ?? {};
+      if (row.item_type === "message" && row.reference_id) {
+        references.push({
+          type: "message",
+          id: String(row.reference_id),
+          senderId: metadata.sender_id ?? metadata.senderId ?? null,
+          subjectId: null,
+          sensitivity: "normal",
+        });
+      } else if (row.item_type === "memory" && row.reference_id) {
+        references.push({
+          type: "memory",
+          id: String(row.reference_id),
+          senderId: metadata.sourceSpeakerId ?? null,
+          subjectId: metadata.subjectId ?? null,
+          sensitivity: metadata.sensitivity ?? "normal",
+        });
+      } else if (row.reference_id) {
+        references.push({
+          type: "source",
+          id: String(row.reference_id),
+          sensitivity: "normal",
+        });
+        try {
+          const payload = JSON.parse(String(row.content ?? "{}"));
+          for (const message of payload.messages ?? []) {
+            if (!message?.message_id) continue;
+            references.push({
+              type: "message",
+              id: String(message.message_id),
+              senderId: message.sender_id ?? null,
+              subjectId: null,
+              sensitivity: "normal",
+            });
+          }
+          for (const memory of payload.memories ?? []) {
+            if (!memory?.memory_id) continue;
+            references.push({
+              type: "memory",
+              id: String(memory.memory_id),
+              senderId: memory.source_speaker_id ?? null,
+              subjectId: memory.subject_id ?? null,
+              sensitivity: memory.sensitivity ?? "normal",
+            });
+          }
+        } catch {
+          // The source itself remains referenceable even if its payload is not JSON.
+        }
+      }
+    }
+    return references;
+  }
+
+  async function loadCompilerProgress(thoughtRunId) {
+    const [thoughtRows, callRows] = await Promise.all([
+      sql`
+        SELECT primary_output, compiler_state, compiler_attempt_count,
+               revision_count
+        FROM thought_runs
+        WHERE id = ${thoughtRunId}
+        LIMIT 1
+      `,
+      sql`
+        SELECT id, purpose, request_context, response_json, sequence_number
+        FROM llm_calls
+        WHERE thought_run_id = ${thoughtRunId}
+          AND purpose IN ('primary', 'tool_continuation', 'revision', 'compiler')
+          AND status = 'succeeded'
+        ORDER BY sequence_number
+      `,
+    ]);
+    const thought = thoughtRows[0];
+    const revisionCalls = callRows.filter((call) => (
+      call.purpose === "revision" &&
+      typeof call.response_json?.content === "string" &&
+      call.response_json.content.trim()
+    ));
+    const finalNaturalCall = [...callRows].reverse().find((call) => (
+      ["primary", "tool_continuation", "revision"].includes(call.purpose) &&
+      typeof call.response_json?.content === "string" &&
+      call.response_json.content.trim() &&
+      !(call.response_json?.toolCalls?.length)
+    ));
+    return {
+      currentOutput: revisionCalls.at(-1)?.response_json.content.trim() ??
+        String(thought?.primary_output ?? "").trim(),
+      requestContext: finalNaturalCall?.request_context ?? [],
+      compilerCalls: callRows.filter((call) => call.purpose === "compiler"),
+      invalidCallIds: new Set(
+        Array.isArray(thought?.compiler_state?.invalidCallIds)
+          ? thought.compiler_state.invalidCallIds.map(String)
+          : [],
+      ),
+      compilerAttemptCount: Number(thought?.compiler_attempt_count ?? 0),
+      revisionCount: Math.max(
+        Number(thought?.revision_count ?? 0),
+        revisionCalls.length,
+      ),
+    };
+  }
+
+  async function recordCompilerAttempt(thoughtRunId) {
+    const rows = await sql`
+      UPDATE thought_runs
+      SET compiler_attempt_count = compiler_attempt_count + 1,
+          compiler_prompt_version = ${ACTION_COMPILER_PROMPT_VERSION},
+          compiler_status = 'running', processing_stage = 'compiler'
+      WHERE id = ${thoughtRunId}
+      RETURNING compiler_attempt_count
+    `;
+    return Number(rows[0].compiler_attempt_count);
+  }
+
+  async function rejectCompilerCall(thoughtRunId, callId, error) {
+    await sql.begin(async (tx) => {
+      const rows = await tx`
+        SELECT compiler_state
+        FROM thought_runs
+        WHERE id = ${thoughtRunId}
+        FOR UPDATE
+      `;
+      const state = rows[0]?.compiler_state && typeof rows[0].compiler_state === "object"
+        ? rows[0].compiler_state
+        : {};
+      const invalidCallIds = [...new Set([
+        ...(Array.isArray(state.invalidCallIds) ? state.invalidCallIds.map(String) : []),
+        String(callId),
+      ])];
+      await tx`
+        UPDATE thought_runs
+        SET compiler_state = ${tx.json({
+          ...state,
+          invalidCallIds,
+          lastValidationError: {
+            code: error.code ?? "compiler_invalid_output",
+            message: error.message,
+          },
+        })}, compiler_status = 'retrying'
+        WHERE id = ${thoughtRunId}
+      `;
+    });
+  }
+
+  function compilerProjection(input) {
+    return {
+      inputTokens: null,
+      contextItems: input.referenceManifest.map((reference) => ({
+        itemType: reference.type,
+        referenceId: reference.id,
+        title: `Compiler reference · ${reference.type}:${reference.id}`,
+        content: null,
+        metadata: {
+          section: "compiler_manifest",
+          senderId: reference.senderId,
+          subjectId: reference.subjectId,
+          sensitivity: reference.sensitivity,
+        },
+      })),
+    };
+  }
+
+  async function runPrimaryRevision({
+    run,
+    thoughtRun,
+    context,
+    progress,
+    revisionReasons,
+    references,
+    maxRevisions,
+  }) {
+    if (progress.revisionCount >= maxRevisions) {
+      throw new ActionCompilerError(
+        "revision_limit_exhausted",
+        "primary revision 已达到上限，未生成 proposal",
+      );
+    }
+    const request = primaryRevisionRequest({
+      requestContext: progress.requestContext,
+      currentOutput: progress.currentOutput,
+      revisionReasons,
+    });
+    const configuration = await loadProfile("primary");
+    const provider = new OpenAiCompatibleProvider({
+      fetchImpl,
+      loadProfile: async () => configuration,
+      timeoutMs: 60_000,
+    });
+    let result;
+    let callRecorded = false;
+    try {
+      await heartbeat(run.id);
+      result = await provider.complete(request);
+      await recordLlmCall({
+        run,
+        thoughtRunId: thoughtRun.id,
+        context,
+        projection: compilerProjection({ referenceManifest: references }),
+        request,
+        configuration,
+        result,
+        responseMetadata: {
+          revisionReasons,
+          sourceOutputHash: stableHash(progress.currentOutput),
+          revisionNumber: progress.revisionCount + 1,
+        },
+      });
+      callRecorded = true;
+      if (result.toolCalls.length || !result.content.trim()) {
+        throw new ActionCompilerError(
+          "revision_invalid_output",
+          "primary revision 必须直接返回自然文本且不得调用工具",
+        );
+      }
+      await sql`
+        UPDATE thought_runs
+        SET revision_count = ${progress.revisionCount + 1},
+            compiler_status = 'needs_revision', processing_stage = 'revision'
+        WHERE id = ${thoughtRun.id}
+      `;
+      return result.content.trim();
+    } catch (error) {
+      if (!callRecorded) {
+        await recordLlmCall({
+          run,
+          thoughtRunId: thoughtRun.id,
+          context,
+          projection: compilerProjection({ referenceManifest: references }),
+          request,
+          configuration,
+          result,
+          error,
+          responseMetadata: {
+            revisionReasons,
+            sourceOutputHash: stableHash(progress.currentOutput),
+            revisionNumber: progress.revisionCount + 1,
+          },
+        });
+      }
+      throw error;
+    }
+  }
+
+  async function commitCompilerResult({
+    run,
+    thoughtRun,
+    compilerCallId,
+    compiled,
+  }) {
+    const now = clock();
+    return sql.begin(async (tx) => {
+      const locked = await tx`
+        SELECT compiler_status
+        FROM thought_runs
+        WHERE id = ${thoughtRun.id}
+        FOR UPDATE
+      `;
+      if (locked[0]?.compiler_status === "accepted") {
+        const existing = await tx`
+          SELECT count(*)::int AS action_count
+          FROM action_proposals
+          WHERE thought_run_id = ${thoughtRun.id}
+        `;
+        return { insertedCount: 0, actionCount: Number(existing[0].action_count) };
+      }
+      let insertedCount = 0;
+      for (const [ordinal, action] of compiled.actions.entries()) {
+        const idempotencyKey = actionProposalIdempotencyKey(
+          thoughtRun.id,
+          ordinal,
+          action,
+        );
+        const proposalId = idempotencyKey;
+        const inserted = await tx`
+          INSERT INTO action_proposals (
+            id, thought_run_id, compiler_llm_call_id, ordinal, proposal_type,
+            status, idempotency_key, payload, evidence_references,
+            policy_reasons, created_at, updated_at
+          ) VALUES (
+            ${proposalId}, ${thoughtRun.id}, ${compilerCallId}, ${ordinal},
+            ${action.type}, 'proposed', ${idempotencyKey},
+            ${tx.json({
+              content: action.content,
+              targetConversationId: action.targetConversationId,
+              replyToMessageId: action.replyToMessageId,
+              subjectId: action.subjectId,
+              sourceSpeakerId: action.sourceSpeakerId,
+              sensitivity: action.sensitivity,
+            })}, ${tx.json(action.evidenceReferences)}, ${tx.json([])},
+            ${now}, ${now}
+          )
+          ON CONFLICT (idempotency_key) DO NOTHING
+          RETURNING id
+        `;
+        insertedCount += inserted.length;
+        await tx`
+          INSERT INTO events (
+            id, conversation_id, event_type, source_type, payload_json,
+            correlation_id, created_at
+          ) VALUES (
+            ${`event:proposal:${proposalId}`}, ${thoughtRun.conversationId},
+            'action_proposal_created', 'agent',
+            ${tx.json({
+              proposalId,
+              thoughtRunId: thoughtRun.id,
+              type: action.type,
+              compilerLlmCallId: compilerCallId,
+            })}, ${run.correlation_id}, ${now}
+          )
+          ON CONFLICT (id) DO NOTHING
+        `;
+      }
+      const decision = compiled.actions.map((action) => action.type).join(",");
+      await tx`
+        UPDATE thought_runs
+        SET status = 'completed', processing_stage = 'completed',
+            compiler_status = 'accepted', compiler_prompt_version = ${ACTION_COMPILER_PROMPT_VERSION},
+            compiler_state = compiler_state || ${tx.json({
+              acceptedCompilerCallId: compilerCallId,
+              actionCount: compiled.actions.length,
+            })}::jsonb,
+            decision = ${decision}, compiled_at = ${now}, completed_at = ${now}
+        WHERE id = ${thoughtRun.id}
+      `;
+      await tx`
+        UPDATE thought_streams
+        SET committed_message_at = ${thoughtRun.newMessageEndAt},
+            committed_message_id = ${thoughtRun.newMessageEndId},
+            version = version + 1, updated_at = ${now}
+        WHERE id = ${thoughtRun.streamId}
+      `;
+      await tx`
+        INSERT INTO job_conversation_watermarks (
+          job_id, conversation_id, last_message_at, last_message_id,
+          last_success_run_id, updated_at
+        ) VALUES (
+          ${run.job_id}, ${thoughtRun.conversationId},
+          ${thoughtRun.newMessageEndAt}, ${thoughtRun.newMessageEndId},
+          ${run.id}, ${now}
+        )
+        ON CONFLICT (job_id, conversation_id) DO UPDATE SET
+          last_message_at = EXCLUDED.last_message_at,
+          last_message_id = EXCLUDED.last_message_id,
+          last_success_run_id = EXCLUDED.last_success_run_id,
+          updated_at = EXCLUDED.updated_at
+      `;
+      return { insertedCount, actionCount: compiled.actions.length };
+    });
+  }
+
+  async function runActionCompiler({ run, thoughtRun, context }) {
+    const maxCompilerAttempts = Math.min(
+      6,
+      Math.max(1, Number(run.config?.maxCompilerAttempts ?? 3)),
+    );
+    const maxRevisions = Math.min(
+      2,
+      Math.max(0, Number(run.config?.maxPrimaryRevisions ?? 2)),
+    );
+    const references = await loadCompilerReferences(thoughtRun.id);
+    const participants = [...new Map([
+      ...context.participants.map((participant) => ({
+        id: participant.participant_id,
+        displayName: participant.display_name,
+      })),
+      { id: "agent-asuka", displayName: "Asuka" },
+    ].map((participant) => [participant.id, participant])).values()];
+    let progress = await loadCompilerProgress(thoughtRun.id);
+    while (true) {
+      const input = buildCompilerInput({
+        thoughtRunId: thoughtRun.id,
+        primaryOutput: progress.currentOutput,
+        conversation: {
+          id: context.conversation.conversation_id,
+          type: context.conversation.type,
+        },
+        participants,
+        references,
+        policy: { maxActions: 4, effectsEnabled: false },
+      });
+      const sourceOutputHash = stableHash(progress.currentOutput);
+      let compilerCall = selectReusableCompilerCall(
+        progress.compilerCalls,
+        progress.invalidCallIds,
+        sourceOutputHash,
+      );
+      let compiled;
+      if (compilerCall) {
+        try {
+          compiled = validateCompilerOutput(
+            parseActionCompilerContent(compilerCall.response_json.content),
+            input,
+          );
+        } catch (error) {
+          await rejectCompilerCall(thoughtRun.id, compilerCall.id, error);
+          compilerCall = null;
+          progress = await loadCompilerProgress(thoughtRun.id);
+          continue;
+        }
+      } else {
+        if (progress.compilerAttemptCount >= maxCompilerAttempts) {
+          throw new ActionCompilerError(
+            "compiler_attempts_exhausted",
+            "fast compiler 已达到重试上限，未执行任何 effect",
+          );
+        }
+        const request = actionCompilerRequest(input);
+        const configuration = await loadProfile("fast");
+        const provider = new OpenAiCompatibleProvider({
+          fetchImpl,
+          loadProfile: async () => configuration,
+          timeoutMs: 60_000,
+        });
+        let result;
+        let callRecorded = false;
+        try {
+          await heartbeat(run.id);
+          result = await provider.complete(request);
+          const callId = await recordLlmCall({
+            run,
+            thoughtRunId: thoughtRun.id,
+            context,
+            projection: compilerProjection(input),
+            request,
+            configuration,
+            result,
+            responseMetadata: { sourceOutputHash },
+          });
+          callRecorded = true;
+          await recordCompilerAttempt(thoughtRun.id);
+          compilerCall = {
+            id: callId,
+            response_json: {
+              content: result.content,
+              metadata: { sourceOutputHash },
+            },
+          };
+          try {
+            compiled = validateCompilerOutput(
+              parseActionCompilerContent(result.content),
+              input,
+            );
+          } catch (error) {
+            await rejectCompilerCall(thoughtRun.id, callId, error);
+            progress = await loadCompilerProgress(thoughtRun.id);
+            continue;
+          }
+        } catch (error) {
+          if (!callRecorded) {
+            await recordLlmCall({
+              run,
+              thoughtRunId: thoughtRun.id,
+              context,
+              projection: compilerProjection(input),
+              request,
+              configuration,
+              result,
+              error,
+              responseMetadata: { sourceOutputHash },
+            });
+            await recordCompilerAttempt(thoughtRun.id);
+          }
+          throw error;
+        }
+      }
+      if (compiled.status === "accepted") {
+        return commitCompilerResult({
+          run,
+          thoughtRun,
+          compilerCallId: compilerCall.id,
+          compiled,
+        });
+      }
+      await runPrimaryRevision({
+        run,
+        thoughtRun,
+        context,
+        progress,
+        revisionReasons: compiled.revisionReasons,
+        references,
+        maxRevisions,
+      });
+      progress = await loadCompilerProgress(thoughtRun.id);
+    }
+  }
+
+  async function completedThoughtMetrics(thoughtRunId) {
+    const rows = await sql`
+      SELECT
+        (SELECT count(*)::int FROM llm_calls WHERE thought_run_id = ${thoughtRunId})
+          AS llm_call_count,
+        (SELECT count(*)::int FROM action_proposals
+         WHERE thought_run_id = ${thoughtRunId} AND proposal_type = 'memory')
+          AS memory_count,
+        (SELECT count(*)::int FROM action_proposals WHERE thought_run_id = ${thoughtRunId})
+          AS proposal_count
+    `;
+    return {
+      llmCallCount: Number(rows[0].llm_call_count),
+      candidateCount: Number(rows[0].memory_count),
+      thoughtCount: Number(rows[0].proposal_count) > 0 ? 1 : 0,
+    };
+  }
+
   async function recordLlmCall({
     run,
     thoughtRunId,
@@ -1287,11 +1821,15 @@ export function createCognitionWorker({
       if (isPrimaryThought) {
         const saved = await loadPrimaryState(thoughtRun.id);
         if (saved.output) {
+          await runActionCompiler({ run, thoughtRun, context });
+          const completed = await completedThoughtMetrics(thoughtRun.id);
           return {
-            messageCount: context.messages.length,
-            llmCallCount: 0,
-            thoughtCount: 1,
-            candidateCount: 0,
+            messageCount: context.messages.filter((message) => (
+              (message.sent_at < new Date(thoughtRun.newMessageEndAt).toISOString()) ||
+              (message.sent_at === new Date(thoughtRun.newMessageEndAt).toISOString() &&
+                message.message_id <= thoughtRun.newMessageEndId)
+            )).length,
+            ...completed,
           };
         }
       }
@@ -1419,9 +1957,11 @@ export function createCognitionWorker({
           context.conversation.conversation_id,
           outputs,
         );
-        metrics.messageCount = context.messages.length;
-        metrics.thoughtCount = 1;
-        return metrics;
+        await runActionCompiler({ run, thoughtRun, context });
+        return {
+          messageCount: context.messages.length,
+          ...await completedThoughtMetrics(thoughtRun.id),
+        };
       }
       for (const chunk of projection.chunks) {
         const request = {
@@ -1486,6 +2026,10 @@ export function createCognitionWorker({
       await sql`
         UPDATE thought_runs
         SET status = 'failed', processing_stage = 'failed',
+            compiler_status = CASE
+              WHEN primary_output IS NOT NULL THEN ${failure.retryable ? "retrying" : "dead_letter"}
+              ELSE compiler_status
+            END,
             summary = ${failure.message}, completed_at = ${clock()}
         WHERE id = ${thoughtRun.id}
       `;

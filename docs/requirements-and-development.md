@@ -4,7 +4,7 @@
 >
 > 更新时间：2026-07-15
 >
-> 状态：NapCat QQ 入站、IM Channel、双档 LLM、Thought Stream、会话隔离上下文和 primary 自然思绪/只读工具循环已实现；fast 动作编译、正式记忆召回与自主外发继续按依赖链实现
+> 状态：NapCat QQ 入站、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、primary 自然思绪/只读工具循环和 fast 动作编译已实现；正式记忆召回与受策略控制的自主外发继续按依赖链实现
 >
 > 配套实现：`Asuka Agent`
 
@@ -469,7 +469,7 @@ outbound_deliveries  平台 message id、状态、撤回信息
 agent_runs           父/子 Agent 运行树、预算、状态
 ```
 
-当前已通过 PostgreSQL migration 实现 `channels`、`inbound_deliveries`、`jobs`、`job_runs`、`llm_profile_settings`、`conversation_participants`、`job_conversation_watermarks`、`thought_runs`、`llm_calls`、`llm_call_context_items`、`operational_thoughts` 与 `memory_candidates`，并在 `messages` 增加逐条 `read_at`、稳定说话人、当时显示名和回复目标。所有 `llm_calls`、行动结论和记忆候选必须关联一个 Thought Run。`outbound_*`、正式记忆、工具和子 Agent 表仍未开放。IM 会话通过正式 `channel_id` 外键归属 Channel；禁止解析拼接 ID 代替关系。模型配置以 `(agent_id, profile)` 为主键，profile 仅允许 `primary | fast`；API Key 使用服务端 `SETTINGS_ENCRYPTION_KEY` 加密，数据库只保存 AES-256-GCM envelope。
+当前已通过 PostgreSQL migration 实现 `channels`、`inbound_deliveries`、`jobs`、`job_runs`、`llm_profile_settings`、`conversation_participants`、`job_conversation_watermarks`、`thought_streams`、`thought_stream_epochs`、`thought_runs`、`llm_calls`、`llm_call_context_items` 与 `action_proposals`；`operational_thoughts` 和 `memory_candidates` 仅保留旧 MVP 数据契约。`messages` 已包含 unread、稳定说话人、author/direction、当时显示名、回复目标和平台消息身份。所有模型调用和 proposal 必须关联 Thought Run，proposal 不等于 effect。`outbound_*`、正式记忆和子 Agent 表仍未开放。IM 会话通过正式 `channel_id` 外键归属 Channel；禁止解析拼接 ID 代替关系。模型配置以 `(agent_id, profile)` 为主键，profile 仅允许 `primary | fast`；API Key 使用服务端 `SETTINGS_ENCRYPTION_KEY` 加密，数据库只保存 AES-256-GCM envelope。
 
 ## 9. API 设计
 
@@ -681,13 +681,13 @@ last_success_at / next_run_at
 
 ### 12.4 当前任务控制面
 
-已登记两个不可配置的基础任务：NapCat WebSocket 事件接收、每 5 秒入站投影。认知 worker 与入站循环并行运行，因此模型超时或失败不会阻塞 QQ 落库。`thought_tick` 默认每 15 分钟使用 primary 档生成自然 Markdown 思绪，并允许消息搜索、证据查询和安全空召回等只读工具循环；完成的 immutable primary output 等待 fast compiler。`memory_consolidation` 仍保留每日 03:00 的旧候选整理任务，后续由统一 memory proposal 流程替代。任务使用 `queued → running → retry_wait | succeeded | dead_letter`、job/Stream lease、heartbeat、有限退避和分块检查点。完整运行协议见 `docs/scheduled-cognition.md`。
+已登记两个不可配置的基础任务：NapCat WebSocket 事件接收、每 5 秒入站投影。认知 worker 与入站循环并行运行，因此模型超时或失败不会阻塞 QQ 落库。`thought_tick` 默认每 15 分钟使用 primary 档生成自然 Markdown 思绪并允许只读工具循环，再由 fast 编译为严格 proposals；compiler 可请求最多两次 primary revision。accepted/no_action proposal、Turn 和 watermark 原子提交。`memory_consolidation` 仍保留每日 03:00 的旧候选整理任务，后续由统一 memory proposal 流程替代。任务使用 `queued → running → retry_wait | succeeded | dead_letter`、job/Stream lease、heartbeat、有限退避和分阶段检查点。完整运行协议见 `docs/scheduled-cognition.md`。
 
 群聊知识空间仍然共享，不按用户硬隔离。每条上下文消息必须携带稳定 `sender_id`、当时显示名、reply target、时间和 message ID；记忆结果分开保存 `source_speaker_id` 与 `subject_id`。确定性校验拒绝上下文外证据、未知 subject、未解析对象上的强行绑定，以及 source 没有实际说出证据的候选。
 
 ### 12.5 Thought Stream v2 目标运行协议
 
-`thought_tick` 已完成 primary 自然思绪阶段，并继续按下列协议接入 fast compiler 与原子提交：
+`thought_tick` 已按下列协议完成 primary、fast compiler、有界 revision 与原子提交：
 
 ```text
 trigger

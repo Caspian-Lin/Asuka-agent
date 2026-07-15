@@ -57,6 +57,13 @@
       "when": 1784133924627,
       "tag": "0007_keen_gravity",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1784135216316,
+      "tag": "0008_lethal_radioactive_man",
+      "breakpoints": true
     }
   ]
 }
