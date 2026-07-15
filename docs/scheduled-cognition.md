@@ -26,6 +26,8 @@ scheduler -> queued job_run -> worker lease + heartbeat
 
 Migration `0006_glorious_rictor` 已建立 `thought_streams`、`thought_stream_epochs`、带 Stream/Epoch/Turn 顺序的 `thought_runs`，以及与实际副作用分离的 `action_proposals`。`llm_calls.purpose` 区分 primary、工具续轮、compiler、revision 和 compression；消息使用 `author_kind`、`direction`、平台消息 ID 与 receipt 表达用户、Asuka 和平台回显。
 
+上下文 projector 已按 Stream 读取初始化历史并集、当前 Epoch 已提交 Turn、压缩输出和本轮新消息。它以模型配置的 `context_window` 计算预算，先裁剪可选历史/低相关记忆，再按时间将必选新消息分块；每块成功后才推进到该块末尾。每次供应商实际收到的 messages 和所引用的 context items 都写入 `llm_calls`，可由 inspector 精确重放。当前正式 memory store 尚未实现，因此 recalled-memory 段保持为空，但顺序和预算接口已经固定。
+
 本仓库仍处于内部开发测试期，`0006` 不为旧 Thought Run 生成兼容 Stream 或 Epoch。已有 0005 测试数据的本地环境应先重建测试数据库，再从完整 migration chain 恢复；不要手工补列或直接改表。若需要回退本项，实现层回滚提交后同样重建测试数据库至目标 migration，而不是尝试保留临时测试数据。
 
 ### 对象与隔离边界

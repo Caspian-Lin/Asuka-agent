@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./scheduled-cognition": "./src/scheduled-cognition.mjs"
+    "./scheduled-cognition": "./src/scheduled-cognition.mjs",
+    "./thought-context": "./src/thought-context.mjs"
   },
   "scripts": {
     "test": "node --experimental-strip-types --test tests/*.test.mjs"

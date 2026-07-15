@@ -4,7 +4,7 @@
 >
 > 更新时间：2026-07-15
 >
-> 状态：NapCat QQ 入站、IM Channel、双档 LLM 和单轮定时认知已进入本地验证；Thought Stream v2、正式记忆召回与自主外发为已确认的下一阶段设计
+> 状态：NapCat QQ 入站、IM Channel、双档 LLM、Thought Stream 数据契约和会话隔离上下文投影已实现；primary 自然思绪、fast 动作编译、正式记忆召回与自主外发继续按依赖链实现
 >
 > 配套实现：`Asuka Agent`
 
