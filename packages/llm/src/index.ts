@@ -18,6 +18,7 @@ export type LlmResponse = {
   inputTokens?: number;
   outputTokens?: number;
   latencyMs: number;
+  requestMessages?: LlmMessage[];
 };
 
 export interface LlmProvider {

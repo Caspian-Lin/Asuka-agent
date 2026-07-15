@@ -1,10 +1,10 @@
 # Asuka Agent：需求与开发设计文档
 
-> 文档版本：0.3.0（Phase 2 双档 LLM 配置）
+> 文档版本：0.6.0（Thought Stream v2 与两阶段认知设计）
 >
 > 更新时间：2026-07-15
 >
-> 状态：第一阶段已实现；NapCat QQ 入站、IM Channel、任务控制面、Monorepo 与双档 LLM 配置已进入本地验证
+> 状态：NapCat QQ 入站、IM Channel、双档 LLM 和单轮定时认知已进入本地验证；Thought Stream v2、正式记忆召回与自主外发为已确认的下一阶段设计
 >
 > 配套实现：`Asuka Agent`
 
@@ -14,7 +14,7 @@
 
 1. 产品范围与阶段规划；
 2. 第一阶段完整需求与验收标准；
-3. 数据模型、API 和评测 schema；
+3. 数据模型、API 和可观测性约束；
 4. 记忆、内部思绪、自主行动、工具、定时任务、IM 接入的演进设计；
 5. 已完成 MVP 的本地运行、测试和后续迁移说明。
 
@@ -29,24 +29,34 @@
 
 ### 2.1 总体判断
 
-原方案的方向合理：记忆、工具、调度器、外部通道和看板正好构成长期 Agent 的五个基础面。但开发顺序需要调整：**先建立事件、候选记忆、Shadow 思绪和评测闭环，再开放自主外发与高权限工具。**
+原方案的方向合理：记忆、工具、调度器、外部通道和看板正好构成长期 Agent 的五个基础面。但开发顺序需要调整：**先建立事件、候选记忆和可追踪思绪运行，再开放召回、自主外发与高权限工具。**
 
-如果先做“持续独白 + 定时发言”，系统会很快产生大量无法判断好坏的数据；如果先做可追溯的 Shadow 数据层，后续的小分类器、调度策略和长期记忆优化都有真实监督信号。
+如果先做“持续独白 + 定时发言”，系统会很快产生大量无法判断好坏的数据。当前先保留真实触发、模型调用、上下文、引用和模型可见输出；数据标注与评测是后续独立工作流，不混入普通思绪查看。
 
-### 2.2 “持续独白”应改为结构化内部思绪
+### 2.2 “持续独白”应改为可审计的自然思绪流
 
-不建议保存或展示模型的原始长篇推理过程。第一，它会迅速污染上下文；第二，它难以评测；第三，它可能包含不可靠推断或敏感信息。产品中应使用 **Operational Thought / 内部思绪对象**：
+不保存模型供应商不可见的隐藏推理，也不要求模型逐 token 输出私有 chain-of-thought。产品中的思绪是主模型显式生成的自然认知工作记录：保留观察、联想、不确定性、互动意图、依据和行动草稿，不用严格 JSON 束缚表达。一次 trigger 形成一个可审计的 **Thought Turn / Thought Run**，其中可以包含多轮主模型调用、记忆召回、只读工具调用、fast 动作编译和外部 source 检索。
+
+认知输出与动作控制分层：
 
 ```text
-内容：一条简短、可行动的候选意图或判断
-依据：事件或记忆 ID
-信号：置信度、新颖度、紧迫度、预期价值、风险
-决策：send_now | defer | silent | shadow
-有效期：过期后不再执行
-人工标签：本来是否应该发送
+primary：自然思绪 + 只读工具循环 + 自然回复/记忆草稿
+fast：将 primary 原文编译为严格 action proposals
+server：身份/证据/权限/预算/幂等校验
+executor：只执行通过策略门的副作用
 ```
 
-这保留了“Agent 在持续思考”的体验，同时不会把不可控的长推理当作长期事实。
+fast 不替 primary 补充思想或润色回复。如果它发现必要信息缺失，应返回可操作的 revision reasons，由 primary 有界修订；`no_action` 是正常结果。发送消息、激活记忆等副作用不由模型直接执行。
+
+```text
+触发：schedule | manual | message | keyword | future trigger
+过程：一轮或多轮 llm_call / memory_retrieval / tool_call / source_retrieval
+上下文：每轮实际输入，以及引用的 message / memory / external source
+消耗：每轮 model、延迟、input/output token
+结果：简短结论、决策、可验证证据和有效期
+```
+
+`operational_thoughts` 只是 Thought Run 可能产生的一个可执行结论，不再代表整个思绪过程。数据标注如需引入，必须使用独立页面和独立权限。
 
 ### 2.3 记忆不应是一棵会频繁搬家的物理树
 
@@ -84,7 +94,7 @@ flowchart TD
 7. 低置信阈值拒答；
 8. 返回记忆及其原始证据。
 
-第一阶段不引入向量服务和图数据库，先用可解释关键词召回验证接口与评测闭环；数据模型已经保留 `entities`、`event_entities`、`memory_links`、有效时间和证据边，便于后续平滑升级。
+当前阶段不引入向量服务和图数据库，也不宣称已经完成召回。现有 worker 只从新增消息生成带证据的 `memory_candidates`；正式记忆库、激活审核、混合召回和上下文注入将在独立里程碑实现。
 
 ## 3. 研究与可参考项目
 
@@ -113,17 +123,16 @@ flowchart TD
 
 - 希望 Agent 跨天、跨设备保持上下文的个人用户；
 - 希望观察并调试长期记忆、主动策略的研究者/开发者；
-- 后续可扩展到团队 IM，但第一阶段只支持单用户 Web。
+- 当前首先支持白名单 QQ 群和私聊，Web 仅作为本地控制台。
 
 ### 4.2 核心用户旅程
 
-1. 用户在网页输入消息；
-2. 系统写入不可变事件；
-3. 系统只召回相关且有效的记忆；
-4. 明确偏好/目标被抽取成候选，而非立即成为事实；
-5. Agent 生成回复与一条 Shadow 思绪；
-6. 用户审查候选记忆，标注思绪应发送/延后/静默；
-7. 用户运行固定评测，确认改动没有破坏召回和拒答。
+1. NapCat 将白名单会话消息经 WebSocket 送入本地接收箱；
+2. worker 幂等投影消息，并由定时或手动 trigger 创建 job run；
+3. 每个有新增消息的会话创建一个 Thought Run；
+4. Thought Run 记录每轮模型上下文、token 与引用来源；
+5. 记忆沉淀思绪可以生成待审候选，但候选不会自动生效；
+6. 用户在 Web 控制台检查 IM、思绪、记忆候选和任务运行。
 
 ### 4.3 产品原则
 
@@ -139,9 +148,9 @@ flowchart TD
 
 | 阶段 | 目标 | 主要交付 | 开放权限 |
 |---|---|---|---|
-| Phase 1（当前） | 建立可审查数据与评测闭环 | Web 对话、事件日志、候选/有效记忆、Shadow 思绪、人工标签、固定评测、设置 | 无外部工具、无主动外发 |
-| Phase 1.5 | 接入真实模型与混合检索 | LLM adapter、embedding/BM25、时间过滤、模型/提示词版本化、离线回放 | 仍为 Shadow |
-| Phase 2 | 接入 IM、调度器和只读工具 | NapCat QQ/Telegram/Slack adapter、任务队列、归档整理、RSS/blog/搜索只读工具 | 只读自动；写操作审批 |
+| Phase 1（已完成） | 建立可靠消息事实源 | NapCat QQ、PostgreSQL 接收箱、会话投影、IM 页面、双档 LLM 设置 | 无外部工具、无主动外发 |
+| Phase 2（当前） | 跑通可追踪认知 MVP | 定时任务、Thought Run、多轮调用模型、上下文/来源审计、记忆候选 | 仍不外发；候选不自动激活 |
+| Phase 2.5 | 正式记忆与召回 | 审核状态机、原子记忆、BM25/vector、时间过滤、召回工具 | 只读召回 |
 | Phase 3 | 小分类器与受限主动发言 | 发送策略模型、校准阈值、A/B、预算、撤回、用户反馈 | 低风险、小预算外发 |
 | Phase 4 | 工具市场、子 Agent、长期学习 | 签名工具包、能力令牌、沙箱、子 Agent、procedural memory | 按域逐项授权 |
 
@@ -149,12 +158,12 @@ flowchart TD
 
 ### 6.1 范围
 
-#### FR-01 对话入口
+#### FR-01 IM 消息入口
 
-- Web 页面可以读取同一会话历史并发送消息；
-- 消息最长 4,000 字符；空消息被拒绝；
-- 每轮用户消息和 Agent 回复均持久化；
-- Agent 回复显示所引用的记忆 ID/标题。
+- NapCat 正向 WebSocket 只接收白名单群和联系人；
+- 原始 delivery 先幂等写入 PostgreSQL，再投影为会话消息；
+- 消息保留稳定 sender ID、当时显示名、回复目标和原始 payload；
+- Web 控制台读取真实会话历史和未读状态。
 
 #### FR-02 不可变事件日志
 
@@ -165,50 +174,45 @@ flowchart TD
 
 #### FR-03 长期记忆候选
 
-- 从“我喜欢/不喜欢/正在做/目标/请记住/以后”类表达提取候选；
-- 候选包含类型、内容、置信度、重要性、来源和证据；
-- 候选只有在人工接受后才能参与召回；
-- 可以拒绝候选或归档有效记忆；
-- 每条记忆保留 `valid_from/valid_to/superseded_at` 接口。
+- 记忆候选只能由一个 Thought Run 产生，并保存 `thought_run_id`；
+- 候选区分 `source_speaker_id` 与 `subject_id`，歧义对象保持 unresolved；
+- 候选保存原始 message evidence、操作类型、置信度和 prompt version；
+- 当前只生成 `pending_review` 候选，不自动激活或覆盖事实。
 
-#### FR-04 可拒绝的记忆召回
+#### FR-04 正式记忆召回（暂缓）
 
-- 只检索 `status=active` 的记忆；
-- 第一阶段使用中文 bigram + 拉丁 token + 重要性/置信度轻量重排；
-- 无实质 token 重合时返回空，不用低相关记忆“凑答案”；
-- 记录命中 ID、分数、召回次数和最后召回时间。
+- 当前 PostgreSQL 链路尚无 active memory store，也不执行记忆召回；
+- 后续只检索已审核、有效且权限匹配的记忆；
+- 召回必须作为 Thought Run 的一个可见步骤，记录 query、命中、分数和证据；
+- 无可靠结果时返回空，不用低相关记忆凑上下文。
 
-#### FR-05 Shadow 思绪
+#### FR-05 思绪运行
 
-- 每轮生成至多一条内部思绪；
-- 思绪包含 kind、内容、证据、五个信号、决策和过期时间；
-- 第一阶段决策固定为 `shadow`，绝不直接发到外部通道；
-- 用户可标注 `send_now | defer | silent`；
-- 标签持久化，作为未来分类器数据。
+- 每个 conversation + job run 最多创建一个 Thought Run；
+- 保存 trigger 类型、原因、时间、状态、简短结论和决策；
+- 支持一轮或多轮 LLM 调用，每轮保存实际上下文、模型输出、延迟和 token；
+- message、memory、tool、external source 都以结构化 context item 引用；
+- 普通查看不提供数据标注；未来标注台必须独立实现。
 
-#### FR-06 回归评测
+#### FR-06 回归评测（暂缓）
 
-- 内置版本化 suite；
-- 第一阶段至少包含：偏好召回、目标召回、未知信息拒答；
-- 每次运行创建 run 和逐 case result；
-- 保存预测记忆、分数、是否拒答、pass 和汇总 accuracy；
-- 页面展示最近结果，不覆盖历史 run。
+- 当前不提供评测页面、固定 seed 或 evaluation API；
+- 等正式记忆召回和回复模式稳定后，再建立版本化数据集与离线回放；
+- 评测数据与正常运行数据分开保存和展示。
 
-#### FR-07 运行策略
+#### FR-07 模型与运行策略
 
-- 可开关 Shadow Mode；关闭仅切换为 Review Mode，不代表自动外发；
-- 可设置安静时段和每日主动预算；
-- 显示当前引擎模式；
-- 可恢复演示初始数据。
+- 主模型与快速模型分别配置 URL、Key、model ID 和上下文长度；
+- API Key 加密保存且不通过 API 回填；
+- 调度任务仅引用 profile，不绑定具体模型；
+- 当前没有演示 seed，也没有恢复演示数据入口。
 
 ### 6.2 第一阶段明确不做
 
-- 不接入真实 IM 账号或代表用户发消息；
+- 不代表用户主动发消息；
 - 不安装、执行第三方工具；
-- 不运行后台 cron；
-- 不调用真实 LLM API，不要求密钥；
 - 不训练主动发言分类器；
-- 不做多用户、组织权限或子 Agent；
+- 不做正式记忆激活、召回、评测、组织权限或子 Agent；
 - 不把内部思绪当作可执行指令。
 
 这些不是遗漏，而是为了先验证数据闭环。
@@ -217,15 +221,14 @@ flowchart TD
 
 | 编号 | 验收项 | 通过条件 |
 |---|---|---|
-| AC-01 | 全链路写入 | 一轮消息产生 user message、received event、thought、assistant message、reply event；有召回/候选时产生对应事件 |
-| AC-02 | 记忆证据 | 新候选可追溯到原始 user event，接受后才参与召回 |
-| AC-03 | 低相关拒绝 | 查询未知生日时不召回项目/界面记忆 |
-| AC-04 | 固定评测 | 初始数据的 3 个 case 全部通过 |
-| AC-05 | Shadow 安全 | 任意内部思绪均不会调用外部发送接口 |
-| AC-06 | 可审查 | 用户能接受/拒绝/归档记忆，能给思绪打三类标签 |
-| AC-07 | 持久化 | 刷新页面后消息、记忆、思绪、设置和评测仍存在 |
-| AC-08 | 响应式 | 320px 宽度可完成聊天、审查和评测主要任务 |
-| AC-09 | 可复现 | 无模型密钥时仍能运行相同评测与数据流 |
+| AC-01 | 全链路写入 | 白名单消息经接收箱投影到 PostgreSQL 会话且幂等 |
+| AC-02 | 思绪过程 | 每个处理会话留下 trigger、至少一轮调用或明确失败状态、token 和上下文 |
+| AC-03 | 记忆来源 | 每条候选关联 Thought Run、source speaker、subject 与 message evidence |
+| AC-04 | 归因安全 | 多人群聊不因昵称、转述或代词把事实强行绑定给错误用户 |
+| AC-05 | 外发安全 | 任意思绪与候选均不会调用外部发送接口 |
+| AC-06 | 增量幂等 | watermark 后无新消息的重跑不再次调用模型 |
+| AC-07 | 单一数据源 | 运行时只使用 PostgreSQL，不包含 D1 seed 或第二套业务数据 |
+| AC-08 | 响应式 | 320px 宽度可查看 IM、思绪、记忆候选和任务状态 |
 
 ## 7. 第一阶段系统设计
 
@@ -233,18 +236,17 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    UI["React 看板"] --> API["Route Handlers"]
-    API --> CORE["Agent Service"]
-    CORE --> RET["可解释检索"]
-    CORE --> EXT["候选抽取"]
-    CORE --> THO["Shadow 思绪策略"]
-    CORE --> DB["D1 / SQLite schema"]
-    DB --> API
+    QQ["NapCat QQ"] --> GW["WebSocket Gateway"]
+    GW --> PG["PostgreSQL"]
+    WK["Agent Worker"] --> PG
+    WK --> LLM["primary / fast LLM"]
+    API["Control API"] --> PG
+    UI["React 控制台"] --> API
 ```
 
-MVP 采用单体全栈部署：React/Vinext Route Handler + Cloudflare D1 + Drizzle schema。这样无需外部密钥即可部署演示，并验证所有领域接口。
+PostgreSQL 是唯一业务事实源。Web 不包含业务 Route Handler，也不持有第二套数据库；它通过本机 control API 查看真实 IM、任务、思绪、模型调用与记忆候选。D1、演示 seed、OpenAI Sites 和 Cloudflare Worker 部署方案已删除。
 
-生产演进建议：
+后续演进建议：
 
 - API/worker 保持无状态；
 - 主数据迁移到 PostgreSQL；
@@ -276,21 +278,20 @@ sequenceDiagram
 
 ```text
 apps/
-  web/                    Vinext UI、Route Handlers、Cloudflare Worker
+  web/                    Vinext 本地控制台 UI
   control-api/            PostgreSQL 查询与控制面
   napcat-gateway/         OneBot WebSocket adapter
   agent-worker/           入站投影与后续调度执行器
 packages/
   agent-core/             纯领域策略：检索、候选、思绪、回复
-  db/                     D1/PostgreSQL schema、migration、数据库脚本
+  db/                     PostgreSQL schema、migration、数据库脚本
   im/                     QQ/OneBot 消息标准化
   config/                 进程环境变量解析与校验
   llm/                    primary/fast LLM adapter、校验与密钥加密
   shared/                 稳定通用代码
 docs/
   requirements-and-development.md
-  schemas/                可机读 schema 与 seed
-scripts/                  根级构建、安装和 workspace 边界检查
+scripts/                  workspace 边界与必要运维脚本
 ```
 
 根目录只负责编排，使用一个 `package-lock.json`。Workspace 间仅通过声明过的 `@asuka-agent/*` 公开 exports 依赖；相对路径越界、私有子路径和循环依赖由 `make check` 阻止。数据库结构与 migration 由 `packages/db` 唯一所有。
@@ -299,9 +300,9 @@ scripts/                  根级构建、安装和 workspace 边界检查
 
 ### 8.1 设计约束
 
-- 全部领域对象使用稳定 UUID；演示 seed 使用稳定可读 ID；
-- 时间统一保存 ISO 8601 UTC；
-- score/confidence 范围为 `[0,1]`；
+- 全部领域对象使用稳定 UUID 或稳定平台 ID；不写入演示 seed；
+- 时间统一保存 PostgreSQL `timestamptz`；
+- confidence 在 PostgreSQL 中使用 `[0,1000]` 整数避免浮点漂移；
 - 原始 event 只追加，不原地改写；
 - 派生记忆必须存在 provenance；
 - `active` 不等于永远正确，时间更新通过 supersede 表达；
@@ -320,22 +321,17 @@ scripts/                  根级构建、安装和 workspace 边界检查
 | `correlation_id` | string | 是 | 串联一次用户轮次或 job |
 | `created_at` | datetime | 是 | 记录时间 |
 
-第一阶段事件枚举：
+当前事件枚举：
 
 ```text
 message_received
-memory_retrieved
 memory_candidate_created
-shadow_thought_created
-agent_replied
-memory_reviewed
-thought_labeled
-evaluation_completed
+operational_thought_created
 ```
 
-Phase 2 增加：`job_triggered/job_succeeded/job_failed/tool_requested/tool_approved/tool_completed/outbound_proposed/outbound_sent/outbound_blocked`。
+后续增加：`memory_retrieved/tool_requested/tool_approved/tool_completed/outbound_proposed/outbound_sent/outbound_blocked`。job 的状态变化当前直接记录在 `job_runs`，避免重复事实源。
 
-### 8.3 记忆 `memories`
+### 8.3 正式记忆 `memories`（目标设计，当前未建表）
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -365,6 +361,8 @@ Phase 2 增加：`job_triggered/job_succeeded/job_failed/tool_requested/tool_app
 - “用户喜欢深色 UI”与“用户今天想看深色 UI”不能合并；
 - 新事实与旧事实冲突时，不覆盖旧行：关闭旧 `valid_to`，创建新行和 `updates/contradicts` link。
 
+当前实际表为 `memory_candidates`：保存 `thought_run_id`、`operation`、`subject_id`、`source_speaker_id`、`claim`、`evidence_message_ids`、置信度、归因状态和 `pending_review` 状态。候选不会参与召回；正式记忆审核与物化将在后续 migration 实现。
+
 ### 8.4 证据与关系
 
 `memory_evidence(memory_id, event_id, evidence_role)` 将记忆连到原始事件，`evidence_role` 为 `supports/contradicts/updates`。
@@ -382,29 +380,39 @@ related_to       弱关联
 
 `entities` 与 `event_entities` 为未来实体图预留。Phase 1 不要求自动实体链接。
 
-### 8.5 内部思绪 `thoughts`
+### 8.5 思绪运行与模型轮次
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `id` | UUID/string | 思绪 ID |
-| `conversation_id` | string | 发生上下文 |
-| `kind` | enum | `suggestion/follow_up/memory_review/reminder/risk_alert` |
-| `content` | string | 可对用户表达的简短意图，不存原始 CoT |
-| `evidence_json` | string[] | event/memory ID |
-| `confidence` | float | 判断可信度 |
-| `novelty` | float | 是否提供新信息 |
-| `urgency` | float | 是否需要立即处理 |
-| `expected_value` | float | 对用户的预期帮助 |
-| `risk` | float | 误触达、隐私或副作用风险 |
-| `decision` | enum | `shadow/send_now/defer/silent/blocked` |
-| `human_label` | enum/null | `send_now/defer/silent` |
-| `label_note` | string/null | 可选原因 |
-| `expires_at` | datetime | 超时后不可执行 |
-| `created_at/updated_at` | datetime | 审计时间 |
+| `thought_runs.id` | string | 一次完整认知过程 ID |
+| `conversation_id/job_run_id` | string | 会话与批任务来源 |
+| `trigger_type/reason` | string | 定时、手动、消息、关键词等触发及原因 |
+| `status/decision/summary` | string | 运行状态与面向用户的简短结论 |
+| `started_at/completed_at` | datetime | 过程耗时边界 |
+| `llm_calls.thought_run_id` | string | 每轮模型调用归属 |
+| `sequence_number` | integer | 同一思绪内的模型轮次 |
+| `request_context` | jsonb | 实际发送给模型的 role/content 列表 |
+| `response_json` | jsonb/null | 模型可见输出；不保存隐藏 CoT |
+| `input_tokens/output_tokens` | integer | 每轮 token 消耗 |
+| `llm_call_context_items` | relation | message/memory/tool/external source 引用 |
 
-初始规则分数只是数据接口，不宣称是经过校准的概率。
+`operational_thoughts` 保存 Thought Run 可选的结构化行动结论。模型选择静默时仍保留 Thought Run 和调用记录，不能因为没有行动结论就让整次思考不可见。
 
-### 8.6 评测数据
+Thought Stream v2 在现有运行记录之上增加持续状态，不把一个 job run 误当成长期上下文：
+
+| 目标对象 | 唯一性/归属 | 作用 |
+|---|---|---|
+| `thought_streams` | `(agent_id, conversation_id)` | 会话隔离的短期认知流，保存 current epoch、已提交 watermark 和并发版本 |
+| `thought_stream_epochs` | `stream_id + ordinal` | 保存压缩输出、覆盖范围、token 统计和 prompt version |
+| `thought_runs` | `stream_id + job_run_id/trigger` | 一次 trigger 形成的 Thought Turn；记录新消息范围和提交状态 |
+| `llm_calls` | `thought_run_id + sequence` | primary、tool continuation、fast compiler、revision 和 compression 的实际调用 |
+| `action_proposals` | `thought_run_id` | `reply/memory/task/no_action` 等结构化候选，不代表已执行 |
+
+旧 epoch 的运行和调用记录不删除。压缩只改变后续上下文投影，必须能从 compression output 追溯到被覆盖的 Turn。
+
+### 8.6 评测数据（设计保留，当前未实现）
+
+本节是正式召回完成后的候选方案。当前仓库没有 evaluation 表、seed、API 或页面，正常运行数据不得与未来评测夹具混用。
 
 #### `evaluation_cases`
 
@@ -446,16 +454,6 @@ related_to       弱关联
 }
 ```
 
-#### 第一阶段 seed
-
-| Case | 类别 | 输入 | 期望 |
-|---|---|---|---|
-| `case-interface-recall` | single fact | 用户更喜欢可视化网页看板还是纯命令行？ | Hit@3 含 `memory-interface` |
-| `case-project-recall` | goal recall | 用户正在规划什么类型的 Agent？ | Hit@3 含 `memory-project` |
-| `case-abstention` | abstention | 用户生日是哪一天？ | 空召回或 top score 低于阈值 |
-
-机器可读定义见 `docs/schemas/phase1-evaluation.schema.json` 与 `docs/schemas/phase1-evaluation-seed.json`。
-
 ### 8.7 Phase 2 数据表与当前进度
 
 ```text
@@ -471,23 +469,11 @@ outbound_deliveries  平台 message id、状态、撤回信息
 agent_runs           父/子 Agent 运行树、预算、状态
 ```
 
-当前已通过 PostgreSQL migration 实现 `channels`、`inbound_deliveries`、`jobs`、`job_runs`、`llm_profile_settings`，并在 `messages` 增加逐条 `read_at`。`outbound_*`、工具和子 Agent 表仍未开放。IM 会话通过正式 `channel_id` 外键归属 Channel；禁止解析拼接 ID 代替关系。模型配置以 `(agent_id, profile)` 为主键，profile 仅允许 `primary | fast`；API Key 使用服务端 `SETTINGS_ENCRYPTION_KEY` 加密，数据库只保存 AES-256-GCM envelope。
+当前已通过 PostgreSQL migration 实现 `channels`、`inbound_deliveries`、`jobs`、`job_runs`、`llm_profile_settings`、`conversation_participants`、`job_conversation_watermarks`、`thought_runs`、`llm_calls`、`llm_call_context_items`、`operational_thoughts` 与 `memory_candidates`，并在 `messages` 增加逐条 `read_at`、稳定说话人、当时显示名和回复目标。所有 `llm_calls`、行动结论和记忆候选必须关联一个 Thought Run。`outbound_*`、正式记忆、工具和子 Agent 表仍未开放。IM 会话通过正式 `channel_id` 外键归属 Channel；禁止解析拼接 ID 代替关系。模型配置以 `(agent_id, profile)` 为主键，profile 仅允许 `primary | fast`；API Key 使用服务端 `SETTINGS_ENCRYPTION_KEY` 加密，数据库只保存 AES-256-GCM envelope。
 
 ## 9. API 设计
 
-所有成功接口返回完整 `Snapshot`，便于 MVP UI 保持简单；生产规模增长后改为 command response + 增量 query。
-
-| 方法 | 路径 | 请求 | 作用 |
-|---|---|---|---|
-| GET | `/api/bootstrap` | — | 获取 Agent、会话、记忆、思绪、评测和指标 |
-| POST | `/api/messages` | `{content}` | 执行一轮完整认知流水线 |
-| PATCH | `/api/memories` | `{id, action}` | `accept/reject/archive` |
-| PATCH | `/api/thoughts` | `{id, label}` | `send_now/defer/silent` |
-| POST | `/api/evaluations` | — | 运行固定 suite |
-| PATCH | `/api/settings` | 策略字段 | 更新 Shadow、安静时段和预算 |
-| POST | `/api/reset` | — | 仅演示环境恢复 seed |
-
-本地 PostgreSQL 控制 API 默认监听 `127.0.0.1:3002`：
+Web 只调用本地 PostgreSQL control API，默认监听 `127.0.0.1:3002`：
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
@@ -495,6 +481,12 @@ agent_runs           父/子 Agent 运行树、预算、状态
 | GET | `/api/im` | 查询 Channel、群会话、历史消息和未读数 |
 | POST | `/api/im/read` | 将指定会话的入站用户消息标为已读 |
 | GET | `/api/jobs` | 查询系统托管任务、规划任务和最近运行 |
+| POST | `/api/jobs/:jobId/run` | 手动入队 `thought_tick | memory_consolidation` |
+| GET | `/api/jobs/:jobId/runs` | 查询最近 50 次 run、尝试和错误状态 |
+| GET | `/api/job-runs/:runId` | 查询模型审计、结构化结果和 watermark |
+| GET | `/api/thought-runs` | 查询真实思绪过程、触发、耗时与 token 汇总 |
+| GET | `/api/thought-runs/:runId` | 查询逐轮上下文、模型输出和引用来源 |
+| GET | `/api/memories` | 查询由思绪产生的 PostgreSQL 记忆候选 |
 | GET | `/api/llm/settings` | 查询双档配置与 Key 状态，不返回密钥或掩码原文 |
 | PUT | `/api/llm/settings/:profile` | 保存 `primary | fast` 配置；空 Key 保留原值 |
 | POST | `/api/llm/settings/:profile/test` | 独立测试已保存配置，返回模型、延迟与 token 审计字段 |
@@ -570,6 +562,25 @@ contradiction_penalty
 | 生成余量 | ≥25% | 回复/计划/工具参数 |
 
 摘要节点只做导航。涉及决定、金额、承诺、时间或隐私时必须下钻到原子事实和证据。
+
+### 10.4 Thought Stream 上下文投影
+
+思绪上下文是一个会话隔离、追加式的动态投影，不是每轮临时拼出的无状态 prompt：
+
+```text
+稳定 system instruction + 稳定 tools
++ 上一 epoch 压缩输出
++ 可选初始化历史（最近 N 条 ∪ 最近 N 分钟）
++ 本 epoch 已提交的新消息/自然思绪/工具结果/动作状态
++ 本轮可披露记忆
++ watermark 后的本轮新来源
+```
+
+上下文消息必须标记 `conversation_type` 和 `author_kind=user|agent|system`。`author_kind=agent` 是 Asuka 自己此前说过的话，不得当成群成员陈述。召回记忆不按 conversation 硬隔离，但必须经过当前参与者、敏感度和 disclosure policy 过滤。
+
+新消息是必选输入；历史和召回是可裁剪输入。预计下一轮达到可用上下文的 70%–75% 时先压缩，为输出和工具结果保留余量。压缩请求不提供任何工具；原始记录保留，新 epoch 只使用完整压缩输出继续。
+
+相同前缀、固定工具顺序和动态内容置尾可以提高 KV/context cache 命中率，但缓存命中不是正确性保证。完整运行协议与端到端示例见 `docs/scheduled-cognition.md`。
 
 ## 11. 主动发言策略与小分类器
 
@@ -670,7 +681,30 @@ last_success_at / next_run_at
 
 ### 12.4 当前任务控制面
 
-已登记两个不可配置的系统任务：NapCat WebSocket 事件接收、每 5 秒入站投影。后者以 `FOR UPDATE SKIP LOCKED` 领取消息，并把有实际处理量或失败的运行写入 `job_runs`。夜间记忆整理和定时回归评测以 `planned + configurable` 展示；在 lease、重试、dead letter 与回滚实现前保持禁用，页面不得暗示它们已在执行。
+已登记两个不可配置的基础任务：NapCat WebSocket 事件接收、每 5 秒入站投影。认知 worker 与入站循环并行运行，因此模型超时或失败不会阻塞 QQ 落库。`thought_tick` 默认每 15 分钟使用 fast 档生成至多一条 Operational Thought；`memory_consolidation` 默认每日 03:00（Asia/Shanghai）使用 primary 档生成待审查 candidate/update/conflict。两者支持手动入队，并使用 `queued → running → retry_wait | succeeded | dead_letter`、lease/heartbeat、有限退避、窗口幂等键和 per-conversation watermark。完整运行协议见 `docs/scheduled-cognition.md`。
+
+群聊知识空间仍然共享，不按用户硬隔离。每条上下文消息必须携带稳定 `sender_id`、当时显示名、reply target、时间和 message ID；记忆结果分开保存 `source_speaker_id` 与 `subject_id`。确定性校验拒绝上下文外证据、未知 subject、未解析对象上的强行绑定，以及 source 没有实际说出证据的候选。
+
+### 12.5 Thought Stream v2 目标运行协议
+
+`thought_tick` 将从“fast 单轮结构化抽取”演进为每会话独立的两阶段认知：
+
+```text
+trigger
+  -> 领取 conversation Thought Stream lease
+  -> 快照 watermark 后新消息
+  -> primary 自然思绪/只读工具循环
+  -> fast 严格 JSON action compiler
+  -> accepted | 有界 primary revision
+  -> 服务端确定性策略校验
+  -> Turn、proposal 与 watermark 原子提交
+```
+
+primary 应被稳定 system instruction 定义为 Asuka，而不是“扮演 Asuka”。这是应用层的持续身份约定，不宣称模型拥有可验证的主观自我。人格和多人归因微调可以在有评测集后改善稳定性，不是 v2 的前置条件。
+
+主模型可以积极寻找与群成员互动的价值，但不得把“每轮必须说话”作为目标。fast 编译器的 `no_action` 必须能正常完成 Turn。reply/memory/task 只生成 proposal；实际发送、激活或其他副作用继续由独立策略门和 executor 处理。
+
+记忆不按 Thought Stream 或 conversation 建立物理孤岛。Thought Turn 可以提出带证据的 memory proposal，后台 consolidation 在 Agent 全局范围去重、冲突分析和 supersede；召回时再根据任务相关性与 disclosure policy 投影到当前会话。
 
 ## 13. 工具、权限与子 Agent
 
@@ -784,7 +818,9 @@ NapCat 作为 OneBot 11 正向 WebSocket 服务端监听 `127.0.0.1:3001`，Asuk
 - 评测集包含越权、注入、错误更新和重复发送；
 - 日志默认脱敏，原始内容按最短保留策略保存。
 
-## 16. 评测方案
+## 16. 评测方案（暂缓）
+
+正式记忆召回和回复模式尚未实现，因此当前不建设评测 UI、运行表或 seed。以下内容仅作为后续设计输入，启用时必须使用独立数据集和页面，不与正常思绪查看混排。
 
 ### 16.1 分层评测
 
@@ -829,8 +865,8 @@ NapCat 作为 OneBot 11 正向 WebSocket 服务端监听 `127.0.0.1:3001`，Asuk
 
 - Node.js `>=22.13`；
 - npm；
-- 无需 LLM API key；
-- D1 binding 名固定为 `DB`。
+- QQ 入站无需 LLM API key；定时思绪和记忆沉淀分别要求已启用的 fast/primary 配置；
+- 本机 PostgreSQL 是唯一应用数据库，连接由 `.env` 的 `DATABASE_URL` 提供。
 
 ### 17.2 本地命令
 
@@ -853,13 +889,13 @@ make db-check
 make test
 ```
 
-`db:generate` 在修改 `packages/db/src/postgres/schema.ts` 后执行，并检查生成的 SQL 是否只包含预期变更。D1 与 PostgreSQL migration 分别位于 `packages/db/drizzle-d1` 和 `packages/db/drizzle-pg`。
+`db:generate` 在修改 `packages/db/src/postgres/schema.ts` 后执行，并检查生成的 SQL 是否只包含预期变更。所有 migration 位于 `packages/db/drizzle-pg`；禁止手工改表或引入第二套业务数据库。
 
 ### 17.3 新增真实模型 adapter
 
 基础 `LlmProvider` 已由 `packages/llm` 实现，业务层必须显式传入 `primary | fast`，不得隐式降级。OpenAI-compatible adapter 返回 `model/latency/token_usage` 审计字段，配置缺失或连接失败只影响当前模型调用，不影响 QQ 入站落库。
 
-不要直接在 `agent-service.ts` 调模型。领域层继续定义：
+不要直接在 HTTP handler 中调模型。领域层继续定义：
 
 ```ts
 interface CognitionAdapter {
@@ -869,7 +905,7 @@ interface CognitionAdapter {
 }
 ```
 
-每次调用记录 `provider/model/prompt_version/temperature/input_hash/output_hash/latency/token_usage`，但不要把隐藏推理保存为日志。确定性 adapter 继续作为测试基线。
+每次调用记录 `thought_run_id/sequence/provider/model/prompt_version/input_hash/output_hash/latency/token_usage`，并保存实际 request context、模型可见输出（自然文本或结构化结果）和结构化 source 引用；不要要求或保存隐藏推理。
 
 ### 17.4 事务与并发
 
@@ -880,18 +916,18 @@ MVP 为单用户、低并发。进入 Phase 2 前必须：
 - settings 与 memory review 使用 version/updated_at 做乐观锁；
 - job 使用 lease + heartbeat；
 - event → projection 使用可重放 consumer；
-- seed 与 migration 从运行时建表迁到正式 deployment migration。
+- 所有 schema 变更继续只通过已审阅的 PostgreSQL migration。
 
 ## 18. 测试策略
 
 ### 18.1 已覆盖
 
-- tokenizer 与低相关拒绝；
-- 相关记忆排序；
-- 偏好/目标候选抽取；
-- Shadow 思绪分支；
-- 页面构建后包含 preview 元数据；
-- 真实浏览器走通：载入、发消息、接受记忆、标注思绪、运行评测、刷新持久化。
+- 结构化模型输出、证据边界和稳定幂等键；
+- 思绪输出的静默与生成分支；
+- Web 控制台不再包含 D1、演示 seed、评测导航或 OpenAI Sites 部署入口；
+- A/B 用户相反偏好、明确转述、昵称变化和代词歧义的归因回归；
+- 认知任务调度边界、有限重试、稳定窗口幂等与手动入队约束；
+- 本地联调走通：QQ 入站、定时/手动 trigger、模型调用、watermark、思绪详情与记忆来源查看。
 
 ### 18.2 后续测试金字塔
 
@@ -899,7 +935,7 @@ MVP 为单用户、低并发。进入 Phase 2 前必须：
 纯函数单测        召回/抽取/策略/时间处理
 repository 测试  schema/约束/事务/并发
 API contract      验证请求响应和错误码
-workflow E2E      消息→记忆→思绪→评测
+workflow E2E      消息→思绪运行→模型轮次→记忆候选
 安全评测          注入/越权/重复副作用
 离线 benchmark    LongMemEval/LoCoMo/proactivity dataset
 小流量 Shadow     不外发，只比较策略建议与用户标签
@@ -931,11 +967,14 @@ outbound_duplicate_prevented
 | 风险 | 当前控制 | 下一步 |
 |---|---|---|
 | 规则抽取误判 | 候选需人工接受 | LLM extractor + schema validation + precision 评测 |
-| 关键词召回漏检 | 可解释基线 + 空召回 | BM25/vector/graph 混合召回 |
+| 正式召回尚未实现 | 候选不参与上下文 | 审核后实现 BM25/vector/graph 混合召回 |
 | 记忆越来越多 | status、归档、原子化 | 后台 consolidation proposal + 分层上下文 |
 | 频繁主动打扰 | 全部 Shadow | 高 precision 分类器 + 硬预算 + 用户控制 |
-| D1 不适合复杂图/向量 | 领域 schema 与存储解耦 | PostgreSQL/pgvector，必要时 Graphiti |
-| 单体服务扩展受限 | 当前易演示 | 拆 gateway/worker/tool runner |
+| 记忆召回尚未实现 | UI 明确只展示候选 | 审核状态机 + PostgreSQL/pgvector，必要时 Graphiti |
+| 单轮 JSON 思绪过于僵硬 | 保留完整调用审计 | primary 自然认知 + fast 结构化动作编译 |
+| 跨 trigger 无会话短期记忆 | 已有 per-conversation watermark | Thought Stream/epoch + 追加式上下文 + 有界压缩 |
+| 多轮工具循环尚未实现 | Thought Run schema 已支持多轮 | 先开放只读 memory/message/source tools，副作用只生成 proposal |
+| Asuka 自身消息不在入站历史 | Gateway 拒绝 self event | outbound 先持久化 `author_kind=agent`，平台回显幂等去重 |
 | 外部内容注入 | Phase 1 无外部抓取 | taint、白名单、最小权限、安全回归 |
 | 评测样本太少 | 明确标记 smoke suite | 引入错误回归集与公开 benchmark |
 
@@ -955,13 +994,16 @@ outbound_duplicate_prevented
 
 ## 22. 关键决策摘要
 
-1. 第一阶段用可复现的确定性引擎，而不是把模型质量和系统质量混在一起；
-2. D1 是 MVP 的轻量持久化，不是最终记忆检索架构；
+1. PostgreSQL 是唯一应用数据库，D1 和部署演示 seed 已删除；
+2. Thought Stream 是按会话隔离的持续短期认知，Thought Run/Turn 是一次 trigger，模型调用和来源从属于该 Turn；
 3. 事件是事实源，记忆与摘要都是可重建投影；
 4. 记忆候选默认不生效；
 5. 物理存储用图/DAG，树只作为渐进披露视图；
 6. 召回热度是弱信号，帮助率、时间有效性、来源与相关性更重要；
-7. 内部思绪是结构化候选，不保存原始长推理；
-8. 小分类器可行，但先用 Shadow Mode 采集高质量三分类标签；
+7. primary 保存自然、可审计的认知工作记录，fast 单独编译结构化动作；不保存供应商隐藏推理；
+8. 数据标注与普通思绪查看分离；当前不引入标注和小分类器；
 9. 调度器只触发 job，发送与工具副作用必须经过独立策略门；
-10. 子 Agent 不能扩权，外部内容不能变成控制指令。
+10. 子 Agent 不能扩权，外部内容不能变成控制指令；
+11. 记忆是 Agent 全局知识而非 conversation 孤岛，但所有个人事实必须保留稳定身份、source/subject、message evidence、敏感度和披露策略；
+12. 模型只提出 reply/memory/task proposal，服务端策略门和幂等 executor 拥有副作用权限；
+13. 压缩开启新 epoch 但不删除原始运行；KV/context cache 只是性能优化，不是正确性依赖。

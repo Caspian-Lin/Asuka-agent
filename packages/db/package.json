@@ -4,9 +4,6 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./d1": "./src/d1/index.ts",
-    "./d1/runtime": "./src/d1/runtime.ts",
-    "./d1/schema": "./src/d1/schema.ts",
     "./postgres/schema": "./src/postgres/schema.ts"
   },
   "scripts": {

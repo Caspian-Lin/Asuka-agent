@@ -4,7 +4,7 @@ import { dirname, relative, resolve } from "node:path";
 const repositoryRoot = process.cwd();
 const workspaceParents = ["apps", "packages"];
 const sourceExtensions = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".mts"]);
-const ignoredDirectories = new Set(["node_modules", "dist", ".next", ".wrangler"]);
+const ignoredDirectories = new Set(["node_modules", "dist", ".next", ".vinext"]);
 
 async function workspaceDirectories() {
   const directories = [];

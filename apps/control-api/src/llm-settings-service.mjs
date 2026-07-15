@@ -10,6 +10,13 @@ import {
   validateLlmSettings,
 } from "@asuka-agent/llm/runtime";
 
+const connectionTestSchema = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: ["ok"],
+  properties: { ok: { type: "boolean" } },
+});
+
 function availability(row) {
   if (!row) return "missing_configuration";
   if (!row.enabled) return "disabled";
@@ -121,11 +128,35 @@ export function createLlmSettingsService({
       });
       const result = await provider.complete({
         profile,
-        messages: [{ role: "user", content: "Respond with OK." }],
+        messages: [
+          {
+            role: "system",
+            content: "Return a JSON object that follows the requested schema.",
+          },
+          { role: "user", content: "Return JSON with ok set to true." },
+        ],
+        responseSchema: connectionTestSchema,
         // A two-token cap can be consumed before reasoning models emit their
         // final answer, producing a valid response with null text.
         maxOutputTokens: 64,
       });
+      let structured;
+      try {
+        structured = JSON.parse(result.content);
+      } catch {
+        throw new LlmConfigurationError(
+          "structured_output_invalid",
+          "模型连接正常，但没有返回有效的结构化 JSON",
+          502,
+        );
+      }
+      if (structured?.ok !== true) {
+        throw new LlmConfigurationError(
+          "structured_output_invalid",
+          "模型连接正常，但未遵循结构化输出要求",
+          502,
+        );
+      }
       await repository.recordTest(agentId, profile, {
         status: "success",
         latencyMs: result.latencyMs,

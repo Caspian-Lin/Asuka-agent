@@ -1,7 +1,9 @@
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import { databaseConfig, positiveInteger } from "@asuka-agent/config";
 import { LlmConfigurationError } from "@asuka-agent/llm/runtime";
 import postgres from "postgres";
+import { createJobsService, JobRequestError } from "./jobs-service.mjs";
 import { createLlmSettingsService } from "./llm-settings-service.mjs";
 
 const host = process.env.CONTROL_API_HOST ?? "127.0.0.1";
@@ -89,6 +91,126 @@ const llmSettingsRepository = {
 const llmSettings = createLlmSettingsService({
   repository: llmSettingsRepository,
   encryptionKey: process.env.SETTINGS_ENCRYPTION_KEY,
+});
+
+const jobsRepository = {
+  listJobs() {
+    return sql`
+      SELECT j.id, j.job_type, j.name, j.description, j.schedule_type,
+             j.schedule_expression, j.timezone, j.configurable, j.enabled,
+             j.status, j.config, j.last_run_at, j.next_run_at, j.updated_at,
+             latest.id AS latest_run_id,
+             latest.status AS latest_run_status,
+             latest.trigger_type AS latest_run_trigger_type,
+             latest.attempt_count AS latest_run_attempt_count,
+             latest.max_attempts AS latest_run_max_attempts,
+             latest.started_at AS latest_run_started_at,
+             latest.completed_at AS latest_run_completed_at,
+             latest.error_code AS latest_run_error_code,
+             latest.error_message AS latest_run_error_message,
+             latest.metrics AS latest_run_metrics
+      FROM jobs AS j
+      LEFT JOIN LATERAL (
+        SELECT id, status, trigger_type, attempt_count, max_attempts, started_at,
+               completed_at, error_code, error_message, metrics, created_at
+        FROM job_runs
+        WHERE job_id = j.id
+        ORDER BY created_at DESC
+        LIMIT 1
+      ) AS latest ON true
+      WHERE j.agent_id = 'agent-asuka'
+      ORDER BY CASE j.status WHEN 'active' THEN 0 ELSE 1 END, j.name
+    `;
+  },
+  async getJob(jobId) {
+    const rows = await sql`
+      SELECT id, job_type, enabled, status, config
+      FROM jobs
+      WHERE id = ${jobId} AND agent_id = 'agent-asuka'
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  },
+  async enqueue(input) {
+    const rows = await sql`
+      INSERT INTO job_runs (
+        id, job_id, status, trigger_type, idempotency_key, correlation_id,
+        scheduled_for, available_at, attempt_count, max_attempts,
+        started_at, completed_at, metrics, created_at
+      ) VALUES (
+        ${input.id}, ${input.jobId}, 'queued', 'manual',
+        ${input.idempotencyKey}, ${input.correlationId}, ${input.now},
+        ${input.now}, 0, ${input.maxAttempts}, NULL, NULL,
+        ${sql.json({})}, ${input.now}
+      )
+      RETURNING id, job_id, status, trigger_type, correlation_id, created_at
+    `;
+    return rows[0];
+  },
+  listRuns(jobId) {
+    return sql`
+      SELECT id, job_id, status, trigger_type, correlation_id, scheduled_for,
+             available_at, attempt_count, max_attempts, lease_owner,
+             lease_expires_at, heartbeat_at, started_at, completed_at,
+             error_code, error_message, metrics, created_at
+      FROM job_runs
+      WHERE job_id = ${jobId}
+      ORDER BY created_at DESC
+      LIMIT 50
+    `;
+  },
+  async getRun(runId) {
+    const runs = await sql`
+      SELECT run.id, run.job_id, job.name AS job_name, job.job_type,
+             run.status, run.trigger_type, run.correlation_id,
+             run.scheduled_for, run.available_at, run.attempt_count,
+             run.max_attempts, run.lease_owner, run.lease_expires_at,
+             run.heartbeat_at, run.started_at, run.completed_at,
+             run.error_code, run.error_message, run.metrics, run.created_at
+      FROM job_runs AS run
+      JOIN jobs AS job ON job.id = run.job_id
+      WHERE run.id = ${runId} AND job.agent_id = 'agent-asuka'
+      LIMIT 1
+    `;
+    if (!runs[0]) return null;
+    const [llmCalls, thoughts, candidates, watermarks] = await Promise.all([
+      sql`
+        SELECT id, thought_run_id, conversation_id, correlation_id, profile,
+               provider, model, prompt_version, input_hash, output_hash,
+               status, error_code, latency_ms, input_tokens, output_tokens,
+               sequence_number, created_at
+        FROM llm_calls WHERE job_run_id = ${runId} ORDER BY created_at
+      `,
+      sql`
+        SELECT id, thought_run_id, conversation_id, intent, basis, evidence_message_ids,
+               confidence_millis, risk, decision, expires_at, prompt_version,
+               created_at
+        FROM operational_thoughts
+        WHERE job_run_id = ${runId} ORDER BY created_at
+      `,
+      sql`
+        SELECT id, thought_run_id, conversation_id, operation, subject_id, source_speaker_id,
+               claim, evidence_message_ids, confidence_millis,
+               attribution_status, target_candidate_id, status,
+               prompt_version, created_at
+        FROM memory_candidates
+        WHERE job_run_id = ${runId} ORDER BY created_at
+      `,
+      sql`
+        SELECT job_id, conversation_id, last_message_at, last_message_id,
+               updated_at
+        FROM job_conversation_watermarks
+        WHERE last_success_run_id = ${runId}
+        ORDER BY conversation_id
+      `,
+    ]);
+    return { run: runs[0], llmCalls, thoughts, candidates, watermarks };
+  },
+};
+
+const jobsService = createJobsService({
+  repository: jobsRepository,
+  randomId: randomUUID,
 });
 
 class RequestError extends Error {
@@ -211,26 +333,124 @@ async function getImSnapshot(conversationId) {
   };
 }
 
-async function getJobs() {
+async function listThoughtRuns() {
   return sql`
-    SELECT j.id, j.job_type, j.name, j.description, j.schedule_type,
-           j.schedule_expression, j.timezone, j.configurable, j.enabled,
-           j.status, j.config, j.last_run_at, j.next_run_at, j.updated_at,
-           latest.status AS latest_run_status,
-           latest.started_at AS latest_run_started_at,
-           latest.completed_at AS latest_run_completed_at,
-           latest.error_code AS latest_run_error_code,
-           latest.metrics AS latest_run_metrics
-    FROM jobs j
+    SELECT thought.id, thought.conversation_id, conversation.title AS conversation_title,
+           thought.job_run_id, thought.correlation_id, thought.trigger_type,
+           thought.trigger_reason, thought.status, thought.decision,
+           thought.summary, thought.started_at, thought.completed_at,
+           thought.created_at, job.job_type,
+           COALESCE(call_stats.call_count, 0)::int AS call_count,
+           COALESCE(call_stats.input_tokens, 0)::int AS input_tokens,
+           COALESCE(call_stats.output_tokens, 0)::int AS output_tokens,
+           COALESCE(call_stats.latency_ms, 0)::int AS latency_ms,
+           COALESCE(output_stats.thought_count, 0)::int AS thought_count,
+           COALESCE(output_stats.candidate_count, 0)::int AS candidate_count
+    FROM thought_runs thought
+    JOIN conversations conversation ON conversation.id = thought.conversation_id
+    JOIN job_runs run ON run.id = thought.job_run_id
+    JOIN jobs job ON job.id = run.job_id
     LEFT JOIN LATERAL (
-      SELECT status, started_at, completed_at, error_code, metrics
-      FROM job_runs
-      WHERE job_id = j.id
-      ORDER BY started_at DESC
-      LIMIT 1
-    ) latest ON true
-    WHERE j.agent_id = 'agent-asuka'
-    ORDER BY CASE j.status WHEN 'active' THEN 0 ELSE 1 END, j.name
+      SELECT count(*) AS call_count,
+             sum(COALESCE(input_tokens, 0)) AS input_tokens,
+             sum(COALESCE(output_tokens, 0)) AS output_tokens,
+             sum(COALESCE(latency_ms, 0)) AS latency_ms
+      FROM llm_calls call
+      WHERE call.thought_run_id = thought.id
+    ) call_stats ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        (SELECT count(*) FROM operational_thoughts output
+         WHERE output.thought_run_id = thought.id) AS thought_count,
+        (SELECT count(*) FROM memory_candidates candidate
+         WHERE candidate.thought_run_id = thought.id) AS candidate_count
+    ) output_stats ON true
+    WHERE thought.agent_id = 'agent-asuka'
+    ORDER BY thought.created_at DESC
+    LIMIT 100
+  `;
+}
+
+async function getThoughtRunDetail(thoughtRunId) {
+  const runs = await sql`
+    SELECT thought.*, conversation.title AS conversation_title,
+           conversation.external_id, job.name AS job_name, job.job_type
+    FROM thought_runs thought
+    JOIN conversations conversation ON conversation.id = thought.conversation_id
+    JOIN job_runs run ON run.id = thought.job_run_id
+    JOIN jobs job ON job.id = run.job_id
+    WHERE thought.id = ${thoughtRunId} AND thought.agent_id = 'agent-asuka'
+    LIMIT 1
+  `;
+  if (!runs[0]) throw new RequestError("thought_run_not_found", "思绪运行不存在", 404);
+  const [calls, outputs, candidates] = await Promise.all([
+    sql`
+      SELECT call.id, call.sequence_number, call.profile, call.provider,
+             call.model, call.prompt_version, call.status, call.error_code,
+             call.latency_ms, call.input_tokens, call.output_tokens,
+             call.request_context, call.response_json, call.created_at,
+             COALESCE(
+               jsonb_agg(
+                 jsonb_build_object(
+                   'id', item.id,
+                   'ordinal', item.ordinal,
+                   'itemType', item.item_type,
+                   'referenceId', item.reference_id,
+                   'title', item.title,
+                   'content', item.content,
+                   'metadata', item.metadata
+                 ) ORDER BY item.ordinal
+               ) FILTER (WHERE item.id IS NOT NULL),
+               '[]'::jsonb
+             ) AS context_items
+      FROM llm_calls call
+      LEFT JOIN llm_call_context_items item ON item.llm_call_id = call.id
+      WHERE call.thought_run_id = ${thoughtRunId}
+      GROUP BY call.id
+      ORDER BY call.sequence_number
+    `,
+    sql`
+      SELECT id, intent, basis, evidence_message_ids, confidence_millis,
+             risk, decision, expires_at, prompt_version, created_at
+      FROM operational_thoughts
+      WHERE thought_run_id = ${thoughtRunId}
+      ORDER BY created_at
+    `,
+    sql`
+      SELECT id, operation, subject_id, source_speaker_id, claim,
+             evidence_message_ids, confidence_millis, attribution_status,
+             target_candidate_id, status, prompt_version, created_at
+      FROM memory_candidates
+      WHERE thought_run_id = ${thoughtRunId}
+      ORDER BY created_at
+    `,
+  ]);
+  return { run: runs[0], calls, outputs, candidates };
+}
+
+async function listMemoryCandidates() {
+  return sql`
+    SELECT candidate.id, candidate.operation, candidate.subject_id,
+           candidate.source_speaker_id, candidate.claim,
+           candidate.evidence_message_ids, candidate.confidence_millis,
+           candidate.attribution_status, candidate.target_candidate_id,
+           candidate.status, candidate.prompt_version, candidate.created_at,
+           candidate.updated_at, candidate.thought_run_id,
+           thought.summary AS thought_summary,
+           thought.trigger_type, thought.trigger_reason,
+           conversation.id AS conversation_id,
+           conversation.title AS conversation_title,
+           COALESCE(participant.display_name, candidate.source_speaker_id)
+             AS source_speaker_name
+    FROM memory_candidates candidate
+    JOIN thought_runs thought ON thought.id = candidate.thought_run_id
+    JOIN conversations conversation ON conversation.id = candidate.conversation_id
+    LEFT JOIN conversation_participants participant
+      ON participant.conversation_id = candidate.conversation_id
+     AND participant.participant_id = candidate.source_speaker_id
+    WHERE candidate.agent_id = 'agent-asuka'
+    ORDER BY candidate.created_at DESC
+    LIMIT 200
   `;
 }
 
@@ -280,7 +500,55 @@ const server = http.createServer(async (request, response) => {
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/jobs") {
-      sendJson(response, 200, { jobs: await getJobs() }, origin);
+      sendJson(response, 200, { jobs: await jobsService.listJobs() }, origin);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/thought-runs") {
+      sendJson(response, 200, { thoughtRuns: await listThoughtRuns() }, origin);
+      return;
+    }
+    const thoughtRunRoute = url.pathname.match(/^\/api\/thought-runs\/([^/]+)$/);
+    if (thoughtRunRoute && request.method === "GET") {
+      sendJson(
+        response,
+        200,
+        await getThoughtRunDetail(decodeURIComponent(thoughtRunRoute[1])),
+        origin,
+      );
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/memories") {
+      sendJson(response, 200, { memories: await listMemoryCandidates() }, origin);
+      return;
+    }
+    const jobRunsRoute = url.pathname.match(/^\/api\/jobs\/([^/]+)\/runs$/);
+    if (jobRunsRoute && request.method === "GET") {
+      sendJson(
+        response,
+        200,
+        { runs: await jobsService.listRuns(decodeURIComponent(jobRunsRoute[1])) },
+        origin,
+      );
+      return;
+    }
+    const jobTriggerRoute = url.pathname.match(/^\/api\/jobs\/([^/]+)\/run$/);
+    if (jobTriggerRoute && request.method === "POST") {
+      sendJson(
+        response,
+        202,
+        { run: await jobsService.trigger(decodeURIComponent(jobTriggerRoute[1])) },
+        origin,
+      );
+      return;
+    }
+    const jobRunRoute = url.pathname.match(/^\/api\/job-runs\/([^/]+)$/);
+    if (jobRunRoute && request.method === "GET") {
+      sendJson(
+        response,
+        200,
+        await jobsService.getRun(decodeURIComponent(jobRunRoute[1])),
+        origin,
+      );
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/llm/settings") {
@@ -328,7 +596,9 @@ const server = http.createServer(async (request, response) => {
     }
     sendJson(response, 404, { error: "接口不存在" }, origin);
   } catch (error) {
-    const expected = error instanceof LlmConfigurationError || error instanceof RequestError;
+    const expected = error instanceof LlmConfigurationError ||
+      error instanceof RequestError ||
+      error instanceof JobRequestError;
     console.error("control API request failed", {
       code: expected ? error.code : "internal_error",
       message: expected ? error.message : "unexpected request failure",

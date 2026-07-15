@@ -4,10 +4,9 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    "./scheduled-cognition": "./src/scheduled-cognition.mjs"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test tests/*.test.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "test": "node --experimental-strip-types --test tests/*.test.mjs"
   }
 }

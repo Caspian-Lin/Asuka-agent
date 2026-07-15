@@ -4,24 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "WRANGLER_LOG_PATH=../../.wrangler/wrangler.log vite",
+    "dev": "vite",
     "build": "vinext build",
-    "start": "WRANGLER_LOG_PATH=../../.wrangler/wrangler.log vinext start",
+    "start": "vinext start",
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@asuka-agent/agent-core": "0.1.0",
-    "@asuka-agent/db": "0.1.0",
-    "@asuka-agent/shared": "0.1.0",
-    "drizzle-orm": "0.45.2",
     "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "vinext": "0.0.50"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
     "@tailwindcss/postcss": "4.2.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
@@ -29,7 +24,6 @@
     "@vitejs/plugin-rsc": "0.5.26",
     "react-server-dom-webpack": "19.2.6",
     "tailwindcss": "4.2.1",
-    "vite": "8.0.13",
-    "wrangler": "4.92.0"
+    "vite": "8.0.13"
   }
 }
