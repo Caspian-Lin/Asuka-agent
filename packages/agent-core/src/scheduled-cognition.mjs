@@ -1,32 +1,12 @@
 import { createHash } from "node:crypto";
+import {
+  PRIMARY_THOUGHT_PROMPT_VERSION,
+  PRIMARY_THOUGHT_SYSTEM_PROMPT,
+  primaryThoughtRequest,
+} from "./primary-thought.mjs";
 
-export const THOUGHT_PROMPT_VERSION = "thought-v1";
+export const THOUGHT_PROMPT_VERSION = PRIMARY_THOUGHT_PROMPT_VERSION;
 export const MEMORY_PROMPT_VERSION = "memory-v1";
-
-const thoughtSchema = Object.freeze({
-  type: "object",
-  additionalProperties: false,
-  required: [
-    "action",
-    "intent",
-    "basis",
-    "evidenceMessageIds",
-    "confidence",
-    "risk",
-    "decision",
-    "expiresInMinutes",
-  ],
-  properties: {
-    action: { type: "string", enum: ["create", "none"] },
-    intent: { type: "string" },
-    basis: { type: "string" },
-    evidenceMessageIds: { type: "array", items: { type: "string" }, maxItems: 8 },
-    confidence: { type: "number", minimum: 0, maximum: 1 },
-    risk: { type: "string", enum: ["low", "medium", "high"] },
-    decision: { type: "string", enum: ["silent", "defer", "review"] },
-    expiresInMinutes: { type: "integer", minimum: 1, maximum: 10_080 },
-  },
-});
 
 const memorySchema = Object.freeze({
   type: "object",
@@ -212,19 +192,10 @@ export function buildSpeakerContext({ conversation, participants, messages, exis
 export function cognitionRequest(jobType, contextPack) {
   const serialized = JSON.stringify(contextPack);
   if (jobType === "thought_tick") {
-    return {
-      profile: "fast",
-      promptVersion: THOUGHT_PROMPT_VERSION,
-      responseSchema: thoughtSchema,
-      maxOutputTokens: 2_048,
-      messages: [
-        {
-          role: "system",
-          content: `You create at most one short Operational Thought for later human review.${identityProtocol}\nUse action=none when no useful candidate exists. Keep basis concise and cite evidence. decision must remain silent, defer, or review; never send a message.`,
-        },
-        { role: "user", content: serialized },
-      ],
-    };
+    return primaryThoughtRequest([
+      { role: "system", content: PRIMARY_THOUGHT_SYSTEM_PROMPT },
+      { role: "user", content: serialized },
+    ]);
   }
   if (jobType === "memory_consolidation") {
     return {

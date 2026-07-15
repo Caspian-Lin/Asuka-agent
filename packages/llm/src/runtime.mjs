@@ -225,6 +225,29 @@ function redactProviderDetail(value) {
   return normalized ? normalized.slice(0, 300) : null;
 }
 
+function normalizeToolCalls(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((toolCall, index) => {
+    const id = typeof toolCall?.id === "string" && toolCall.id
+      ? toolCall.id
+      : `tool-call-${index + 1}`;
+    const name = toolCall?.function?.name;
+    const argumentsText = toolCall?.function?.arguments;
+    if (typeof name !== "string" || !name || typeof argumentsText !== "string") {
+      throw new LlmConfigurationError(
+        "provider_invalid_tool_call",
+        "模型服务返回了无效工具调用",
+        502,
+      );
+    }
+    return {
+      id,
+      type: "function",
+      function: { name, arguments: argumentsText },
+    };
+  });
+}
+
 async function providerErrorDetail(response) {
   try {
     const payload = await response.json();
@@ -274,6 +297,10 @@ export class OpenAiCompatibleProvider {
           body: JSON.stringify({
             model: configuration.modelId,
             messages: requestMessages,
+            ...(Array.isArray(request.tools) && request.tools.length
+              ? { tools: request.tools }
+              : {}),
+            ...(request.toolChoice ? { tool_choice: request.toolChoice } : {}),
             ...(request.maxOutputTokens
               ? { max_tokens: request.maxOutputTokens }
               : {}),
@@ -312,7 +339,8 @@ export class OpenAiCompatibleProvider {
     }
     const choice = payload?.choices?.[0];
     const content = choice?.message?.content;
-    if (typeof content !== "string" || !content.trim()) {
+    const toolCalls = normalizeToolCalls(choice?.message?.tool_calls);
+    if ((typeof content !== "string" || !content.trim()) && toolCalls.length === 0) {
       if (choice?.finish_reason === "length") {
         throw new LlmConfigurationError(
           "provider_output_exhausted",
@@ -323,7 +351,11 @@ export class OpenAiCompatibleProvider {
       throw new LlmConfigurationError("provider_invalid_response", "模型服务响应缺少文本内容", 502);
     }
     return {
-      content,
+      content: typeof content === "string" ? content : "",
+      toolCalls,
+      finishReason: typeof choice?.finish_reason === "string"
+        ? choice.finish_reason
+        : undefined,
       model: typeof payload.model === "string" ? payload.model : configuration.modelId,
       inputTokens: Number.isFinite(payload?.usage?.prompt_tokens)
         ? payload.usage.prompt_tokens
