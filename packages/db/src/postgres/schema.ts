@@ -5,6 +5,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  pgEnum,
   primaryKey,
   text,
   timestamp,
@@ -19,6 +20,34 @@ export const agents = pgTable("agents", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 });
+
+export const llmProfile = pgEnum("llm_profile", ["primary", "fast"]);
+
+export const llmProfileSettings = pgTable(
+  "llm_profile_settings",
+  {
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    profile: llmProfile("profile").notNull(),
+    displayName: text("display_name").notNull(),
+    baseUrl: text("base_url").notNull(),
+    modelId: text("model_id").notNull(),
+    encryptedApiKey: text("encrypted_api_key"),
+    contextWindow: integer("context_window").notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    lastTestStatus: text("last_test_status"),
+    lastTestLatencyMs: integer("last_test_latency_ms"),
+    lastTestErrorCode: text("last_test_error_code"),
+    lastTestedAt: timestamp("last_tested_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.agentId, table.profile] }),
+    index("llm_profile_settings_agent_idx").on(table.agentId),
+  ],
+);
 
 /** Authoritative boundary for external IM accounts and deliveries. */
 export const channels = pgTable(

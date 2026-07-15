@@ -11,6 +11,7 @@
 - 仅保存 `.env` 白名单内的 QQ 群和私聊联系人消息，自身消息被拒绝；
 - PostgreSQL 幂等接收箱、持续消息投影和逐条未读状态；
 - IM Channel、群会话历史和定时任务可视化页面；
+- 主模型与快速小模型双档配置、加密密钥和独立连接测试；
 - Drizzle PostgreSQL schema、版本化 migration 与一致性检查。
 
 ## 快速开始
@@ -32,6 +33,14 @@ NAPCAT_PRIVATE_USER_WHITELIST=1122334455
 ```
 
 两个白名单都为空表示不保存任何 QQ 消息。Web 默认运行在 `3000`，本地 PostgreSQL 控制 API 运行在 `3002`。
+
+模型 API Key 使用 `SETTINGS_ENCRYPTION_KEY` 做 AES-256-GCM 加密。首次运行前生成本机密钥：
+
+```bash
+openssl rand -base64 32
+```
+
+将结果填入 `.env`，随后执行 `make db-migrate`。设置页只显示 Key 是否已配置，不会回填明文。
 
 ## 常用命令
 
@@ -56,7 +65,7 @@ apps/agent-worker/           入站投影与后续调度 Worker
 packages/agent-core/         无运行时依赖的 Agent 领域策略
 packages/db/                 D1/PostgreSQL schema、migration 与数据库脚本
 packages/im/                 IM/OneBot 消息标准化
-packages/config|llm|shared/  配置、模型契约与稳定通用代码
+packages/config|llm|shared/  配置、模型 adapter 与稳定通用代码
 docs/                        核心需求、设计与接入文档
 ```
 

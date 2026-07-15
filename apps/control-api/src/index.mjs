@@ -1,11 +1,103 @@
 import http from "node:http";
 import { databaseConfig, positiveInteger } from "@asuka-agent/config";
+import { LlmConfigurationError } from "@asuka-agent/llm/runtime";
 import postgres from "postgres";
+import { createLlmSettingsService } from "./llm-settings-service.mjs";
 
 const host = process.env.CONTROL_API_HOST ?? "127.0.0.1";
 const port = positiveInteger(process.env, "CONTROL_API_PORT", 3002);
 const database = databaseConfig(process.env, "the control API");
 const sql = postgres(database.url, { ssl: database.ssl });
+
+const llmSettingsRepository = {
+  list(agentId) {
+    return sql`
+      SELECT profile, display_name, base_url, model_id,
+             (encrypted_api_key IS NOT NULL) AS key_configured,
+             context_window, enabled, last_test_status, last_test_latency_ms,
+             last_test_error_code, last_tested_at, updated_at
+      FROM llm_profile_settings
+      WHERE agent_id = ${agentId}
+      ORDER BY profile
+    `;
+  },
+  async get(agentId, profile) {
+    const rows = await sql`
+      SELECT profile, display_name, base_url, model_id, encrypted_api_key,
+             context_window, enabled, last_test_status, last_test_latency_ms,
+             last_test_error_code, last_tested_at, updated_at
+      FROM llm_profile_settings
+      WHERE agent_id = ${agentId} AND profile = ${profile}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  },
+  async upsert(agentId, settings) {
+    const rows = await sql`
+      INSERT INTO llm_profile_settings (
+        agent_id, profile, display_name, base_url, model_id,
+        encrypted_api_key, context_window, enabled, created_at, updated_at
+      ) VALUES (
+        ${agentId}, ${settings.profile}, ${settings.displayName},
+        ${settings.baseUrl}, ${settings.modelId}, ${settings.encryptedApiKey},
+        ${settings.contextWindow}, ${settings.enabled}, now(), now()
+      )
+      ON CONFLICT (agent_id, profile) DO UPDATE SET
+        display_name = EXCLUDED.display_name,
+        base_url = EXCLUDED.base_url,
+        model_id = EXCLUDED.model_id,
+        encrypted_api_key = EXCLUDED.encrypted_api_key,
+        context_window = EXCLUDED.context_window,
+        enabled = EXCLUDED.enabled,
+        last_test_status = NULL,
+        last_test_latency_ms = NULL,
+        last_test_error_code = NULL,
+        last_tested_at = NULL,
+        updated_at = now()
+      RETURNING *
+    `;
+    return rows[0];
+  },
+  async clearApiKey(agentId, profile) {
+    const rows = await sql`
+      UPDATE llm_profile_settings
+      SET encrypted_api_key = NULL,
+          enabled = false,
+          last_test_status = NULL,
+          last_test_latency_ms = NULL,
+          last_test_error_code = NULL,
+          last_tested_at = NULL,
+          updated_at = now()
+      WHERE agent_id = ${agentId} AND profile = ${profile}
+      RETURNING *
+    `;
+    return rows[0] ?? null;
+  },
+  async recordTest(agentId, profile, result) {
+    await sql`
+      UPDATE llm_profile_settings
+      SET last_test_status = ${result.status},
+          last_test_latency_ms = ${result.latencyMs},
+          last_test_error_code = ${result.errorCode},
+          last_tested_at = now(),
+          updated_at = now()
+      WHERE agent_id = ${agentId} AND profile = ${profile}
+    `;
+  },
+};
+
+const llmSettings = createLlmSettingsService({
+  repository: llmSettingsRepository,
+  encryptionKey: process.env.SETTINGS_ENCRYPTION_KEY,
+});
+
+class RequestError extends Error {
+  constructor(code, message, status = 400) {
+    super(message);
+    this.code = code;
+    this.status = status;
+  }
+}
 
 function allowedOrigin(origin) {
   if (!origin) return null;
@@ -34,9 +126,15 @@ async function readJson(request) {
   let raw = "";
   for await (const chunk of request) {
     raw += chunk;
-    if (raw.length > 16_384) throw new Error("请求体过大");
+    if (raw.length > 16_384) {
+      throw new RequestError("request_too_large", "请求体过大", 413);
+    }
   }
-  return raw ? JSON.parse(raw) : {};
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new RequestError("invalid_json", "请求 JSON 格式无效");
+  }
 }
 
 async function getImSnapshot(conversationId) {
@@ -141,7 +239,7 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "OPTIONS") {
     response.writeHead(204, {
       ...(origin ? { "Access-Control-Allow-Origin": origin, Vary: "Origin" } : {}),
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, PUT, POST, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
       "Access-Control-Max-Age": "600",
     });
@@ -167,7 +265,9 @@ const server = http.createServer(async (request, response) => {
     }
     if (request.method === "POST" && url.pathname === "/api/im/read") {
       const payload = await readJson(request);
-      if (!payload.conversationId) throw new Error("缺少 conversationId");
+      if (!payload.conversationId) {
+        throw new RequestError("conversation_required", "缺少 conversationId");
+      }
       const updated = await sql`
         UPDATE messages
         SET read_at = now()
@@ -183,13 +283,63 @@ const server = http.createServer(async (request, response) => {
       sendJson(response, 200, { jobs: await getJobs() }, origin);
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/llm/settings") {
+      sendJson(response, 200, await llmSettings.listProfiles(), origin);
+      return;
+    }
+    const llmRoute = url.pathname.match(
+      /^\/api\/llm\/settings\/(primary|fast)(?:\/(test|key))?$/,
+    );
+    if (llmRoute) {
+      const [, profile, action] = llmRoute;
+      if (request.method === "PUT" && !action) {
+        sendJson(
+          response,
+          200,
+          { profile: await llmSettings.saveProfile(profile, await readJson(request)) },
+          origin,
+        );
+        return;
+      }
+      if (request.method === "POST" && action === "test") {
+        sendJson(
+          response,
+          200,
+          { result: await llmSettings.testProfile(profile) },
+          origin,
+        );
+        return;
+      }
+      if (request.method === "DELETE" && action === "key") {
+        const payload = await readJson(request);
+        sendJson(
+          response,
+          200,
+          {
+            profile: await llmSettings.deleteApiKey(
+              profile,
+              payload.confirmation,
+            ),
+          },
+          origin,
+        );
+        return;
+      }
+    }
     sendJson(response, 404, { error: "接口不存在" }, origin);
   } catch (error) {
-    console.error("control API request failed", error);
+    const expected = error instanceof LlmConfigurationError || error instanceof RequestError;
+    console.error("control API request failed", {
+      code: expected ? error.code : "internal_error",
+      message: expected ? error.message : "unexpected request failure",
+    });
     sendJson(
       response,
-      400,
-      { error: error instanceof Error ? error.message : "请求失败" },
+      expected ? error.status : 500,
+      {
+        error: expected ? error.message : "服务端处理请求失败",
+        code: expected ? error.code : "internal_error",
+      },
       origin,
     );
   }
