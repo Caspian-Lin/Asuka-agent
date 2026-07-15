@@ -69,6 +69,14 @@ export function thoughtRunIdFor(runId, conversationId) {
   return `thought-run:${stableHash({ jobRunId: runId, conversationId })}`;
 }
 
+export function thoughtStreamIdFor(agentId, conversationId) {
+  return `thought-stream:${stableHash({ agentId, conversationId })}`;
+}
+
+export function thoughtEpochIdFor(streamId, ordinal) {
+  return `thought-epoch:${stableHash({ streamId, ordinal })}`;
+}
+
 export function cognitionTriggerReason(run) {
   const source = run.trigger_type === "manual" ? "手动触发" : "定时计划到期";
   return run.job_type === "memory_consolidation"
@@ -302,23 +310,76 @@ export function createCognitionWorker({
     });
   }
 
-  async function ensureThoughtRun(run, conversation) {
+  async function ensureThoughtRun(run, conversation, context) {
     const id = thoughtRunIdFor(run.id, conversation.id);
+    const streamId = thoughtStreamIdFor(run.agent_id, conversation.id);
+    const firstMessage = context.messages[0];
+    const lastMessage = context.messages.at(-1);
     const now = clock();
-    const rows = await sql`
-      INSERT INTO thought_runs (
-        id, agent_id, conversation_id, job_run_id, correlation_id,
-        trigger_type, trigger_reason, status, started_at, created_at
-      ) VALUES (
-        ${id}, ${run.agent_id}, ${conversation.id}, ${run.id},
-        ${run.correlation_id}, ${run.trigger_type}, ${cognitionTriggerReason(run)},
-        'running', ${now}, ${now}
-      )
-      ON CONFLICT (job_run_id, conversation_id) DO UPDATE SET
-        status = 'running', completed_at = NULL
-      RETURNING id
-    `;
-    return rows[0].id;
+    return sql.begin(async (tx) => {
+      await tx`
+        INSERT INTO thought_streams (
+          id, agent_id, conversation_id, status, current_epoch_ordinal,
+          version, created_at, updated_at
+        ) VALUES (
+          ${streamId}, ${run.agent_id}, ${conversation.id}, 'active', 1,
+          0, ${now}, ${now}
+        )
+        ON CONFLICT (agent_id, conversation_id) DO NOTHING
+      `;
+      const streams = await tx`
+        SELECT id, current_epoch_ordinal
+        FROM thought_streams
+        WHERE agent_id = ${run.agent_id} AND conversation_id = ${conversation.id}
+        FOR UPDATE
+      `;
+      const stream = streams[0];
+      const epochId = thoughtEpochIdFor(stream.id, stream.current_epoch_ordinal);
+      await tx`
+        INSERT INTO thought_stream_epochs (
+          id, stream_id, ordinal, status, started_at, created_at
+        ) VALUES (
+          ${epochId}, ${stream.id}, ${stream.current_epoch_ordinal},
+          'active', ${now}, ${now}
+        )
+        ON CONFLICT (stream_id, ordinal) DO NOTHING
+      `;
+      const existing = await tx`
+        SELECT id
+        FROM thought_runs
+        WHERE job_run_id = ${run.id} AND conversation_id = ${conversation.id}
+        LIMIT 1
+      `;
+      if (existing[0]) {
+        await tx`
+          UPDATE thought_runs
+          SET status = 'running', processing_stage = 'primary', completed_at = NULL
+          WHERE id = ${existing[0].id}
+        `;
+        return existing[0].id;
+      }
+      const ordinals = await tx`
+        SELECT COALESCE(max(turn_ordinal), 0)::int + 1 AS next_ordinal
+        FROM thought_runs
+        WHERE stream_id = ${stream.id}
+      `;
+      const rows = await tx`
+        INSERT INTO thought_runs (
+          id, agent_id, conversation_id, stream_id, epoch_id, turn_ordinal,
+          job_run_id, correlation_id, trigger_type, trigger_reason, status,
+          processing_stage, new_message_start_at, new_message_start_id,
+          new_message_end_at, new_message_end_id, started_at, created_at
+        ) VALUES (
+          ${id}, ${run.agent_id}, ${conversation.id}, ${stream.id}, ${epochId},
+          ${ordinals[0].next_ordinal}, ${run.id}, ${run.correlation_id},
+          ${run.trigger_type}, ${cognitionTriggerReason(run)}, 'running',
+          'primary', ${firstMessage.sent_at}, ${firstMessage.message_id},
+          ${lastMessage.sent_at}, ${lastMessage.message_id}, ${now}, ${now}
+        )
+        RETURNING id
+      `;
+      return rows[0].id;
+    });
   }
 
   async function recordLlmCall({
@@ -541,9 +602,18 @@ export function createCognitionWorker({
         : "memory_review";
       await tx`
         UPDATE thought_runs
-        SET status = 'completed', decision = ${decision}, summary = ${summary},
-            completed_at = ${now}
+        SET status = 'completed', processing_stage = 'completed',
+            decision = ${decision}, summary = ${summary}, completed_at = ${now}
         WHERE id = ${thoughtRunId}
+      `;
+      await tx`
+        UPDATE thought_streams AS stream
+        SET committed_message_at = ${lastMessage.sent_at},
+            committed_message_id = ${lastMessage.message_id},
+            version = stream.version + 1,
+            updated_at = ${now}
+        FROM thought_runs AS thought
+        WHERE thought.id = ${thoughtRunId} AND stream.id = thought.stream_id
       `;
     });
     return metrics;
@@ -552,7 +622,7 @@ export function createCognitionWorker({
   async function processConversation(run, conversation) {
     const context = await loadContext(run, conversation);
     const request = cognitionRequest(run.job_type, context);
-    const thoughtRunId = await ensureThoughtRun(run, conversation);
+    const thoughtRunId = await ensureThoughtRun(run, conversation, context);
     let configuration;
     let result;
     let callRecorded = false;
@@ -602,7 +672,8 @@ export function createCognitionWorker({
       const failure = cognitionError(error);
       await sql`
         UPDATE thought_runs
-        SET status = 'failed', summary = ${failure.message}, completed_at = ${clock()}
+        SET status = 'failed', processing_stage = 'failed',
+            summary = ${failure.message}, completed_at = ${clock()}
         WHERE id = ${thoughtRunId}
       `;
       throw error;

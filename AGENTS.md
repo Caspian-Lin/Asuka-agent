@@ -22,6 +22,8 @@ Use TypeScript/ES modules, two-space indentation, semicolons, and existing ESLin
 
 Import another workspace only through its `@asuka-agent/*` public exports; never traverse package boundaries with relative paths.
 
+This repository is still in internal development and testing. Continue to make every schema change through a reviewed PostgreSQL migration, but do not add legacy-data backfills or compatibility migrations unless explicitly requested; local test data may be reset and rebuilt from the current migration chain.
+
 ## Testing Guidelines
 
 Tests use Node's built-in runner and follow `<workspace>/tests/*.test.mjs`. Add regression tests for behavioral changes, especially ingestion idempotency and agent decisions. `make check` includes lint, typecheck, workspace-boundary validation, and unit tests. Run it before every PR and `make test` before merge. No numeric coverage threshold exists; cover success and important failure paths.

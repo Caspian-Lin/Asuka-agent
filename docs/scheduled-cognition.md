@@ -22,6 +22,12 @@ scheduler -> queued job_run -> worker lease + heartbeat
 
 ## Thought Stream v2
 
+### 数据契约状态
+
+Migration `0006_glorious_rictor` 已建立 `thought_streams`、`thought_stream_epochs`、带 Stream/Epoch/Turn 顺序的 `thought_runs`，以及与实际副作用分离的 `action_proposals`。`llm_calls.purpose` 区分 primary、工具续轮、compiler、revision 和 compression；消息使用 `author_kind`、`direction`、平台消息 ID 与 receipt 表达用户、Asuka 和平台回显。
+
+本仓库仍处于内部开发测试期，`0006` 不为旧 Thought Run 生成兼容 Stream 或 Epoch。已有 0005 测试数据的本地环境应先重建测试数据库，再从完整 migration chain 恢复；不要手工补列或直接改表。若需要回退本项，实现层回滚提交后同样重建测试数据库至目标 migration，而不是尝试保留临时测试数据。
+
 ### 对象与隔离边界
 
 ```text

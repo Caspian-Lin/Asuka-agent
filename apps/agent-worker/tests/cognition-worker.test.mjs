@@ -7,7 +7,9 @@ import {
   cognitionTriggerReason,
   nextRunAt,
   retryDelayMs,
+  thoughtEpochIdFor,
   thoughtRunIdFor,
+  thoughtStreamIdFor,
 } from "../src/cognition-worker.mjs";
 
 test("thought schedules advance from the later of due time and current time", () => {
@@ -63,4 +65,15 @@ test("thought runs keep stable identity and explicit trigger provenance", () => 
     trigger_type: "manual",
     job_type: "memory_consolidation",
   }), /手动触发.*记忆候选/);
+});
+
+test("thought streams and epochs have stable conversation-scoped identities", () => {
+  const stream = thoughtStreamIdFor("agent-asuka", "conversation-1");
+  assert.equal(stream, thoughtStreamIdFor("agent-asuka", "conversation-1"));
+  assert.notEqual(stream, thoughtStreamIdFor("agent-asuka", "conversation-2"));
+  assert.equal(
+    thoughtEpochIdFor(stream, 1),
+    thoughtEpochIdFor(stream, 1),
+  );
+  assert.notEqual(thoughtEpochIdFor(stream, 1), thoughtEpochIdFor(stream, 2));
 });
