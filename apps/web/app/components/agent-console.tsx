@@ -5,14 +5,16 @@ import ImChannelPage from "@/app/components/im-channel-page";
 import JobsPage from "@/app/components/jobs-page";
 import LlmSettingsPanel from "@/app/components/llm-settings-panel";
 import MemoriesPage from "@/app/components/memories-page";
+import SpeechDecisionsPage from "@/app/components/speech-decisions-page";
 import ThoughtRunsPage from "@/app/components/thought-runs-page";
 
-type ViewKey = "channels" | "thoughts" | "memories" | "jobs" | "settings";
+type ViewKey = "channels" | "thoughts" | "memories" | "speech" | "jobs" | "settings";
 
 const navItems: Array<{ key: ViewKey; label: string; glyph: string }> = [
   { key: "channels", label: "IM Channel", glyph: "◎" },
   { key: "thoughts", label: "思绪", glyph: "◌" },
   { key: "memories", label: "记忆", glyph: "◇" },
+  { key: "speech", label: "自主发言", glyph: "◉" },
   { key: "jobs", label: "定时任务", glyph: "◷" },
   { key: "settings", label: "设置", glyph: "⊙" },
 ];
@@ -65,6 +67,7 @@ export default function AgentConsole() {
         {activeView === "channels" && <ImChannelPage />}
         {activeView === "thoughts" && <ThoughtRunsPage requestedRunId={requestedThoughtRunId} />}
         {activeView === "memories" && <MemoriesPage onOpenThought={openThought} />}
+        {activeView === "speech" && <SpeechDecisionsPage onOpenThought={openThought} />}
         {activeView === "jobs" && <JobsPage />}
 
         {activeView === "settings" && (

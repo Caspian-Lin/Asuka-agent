@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/napcat-ingress.mjs"
+    ".": "./src/napcat-ingress.mjs",
+    "./napcat-outbound": "./src/napcat-outbound.mjs"
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs"

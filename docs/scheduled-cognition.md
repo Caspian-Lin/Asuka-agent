@@ -9,7 +9,7 @@
 - `thought_tick`：每 15 分钟检查各白名单 QQ 会话 watermark 后的新消息，由 primary 模型生成自然 Markdown 思绪并进行有界只读 tool-call 循环；fast 随后把原文编译为严格 reply/memory/task/no_action proposals，必要时最多要求两次 primary revision；
 - `memory_consolidation`：每天 03:00（Asia/Shanghai）由 primary 模型生成待审的 create/update/conflict 记忆候选。
 
-每个会话拥有独立 Thought Stream、Epoch、追加式 Turn 和 watermark。accepted proposal、Turn 完成状态和 watermark 已原子提交，`no_action` 同样是成功结果。当前没有正式记忆召回、Agent 外发执行或上下文压缩；`recall_memories` 在 reviewed memory store 上线前明确返回空，不会把待审候选伪装成已召回记忆。
+每个会话拥有独立 Thought Stream、Epoch、追加式 Turn 和 watermark。accepted proposal、Turn 完成状态和 watermark 已原子提交，`no_action` 同样是成功结果。reply proposal 已接入服务端硬策略和 NapCat 唯一出站队列；默认总开关关闭且为 Shadow。当前没有正式记忆召回或上下文压缩；`recall_memories` 在 reviewed memory store 上线前明确返回空，不会把待审候选伪装成已召回记忆。
 
 ```text
 scheduler -> queued job_run -> worker lease + heartbeat
@@ -19,13 +19,14 @@ scheduler -> queued job_run -> worker lease + heartbeat
           -> immutable primary output + event
           -> fast strict compiler + bounded revision
           -> proposals + Turn + watermark atomic commit
+          -> speech hard policy -> shadow | defer | block | NapCat delivery
 ```
 
 ## Thought Stream v2
 
 ### 数据契约状态
 
-Migration `0006_glorious_rictor` 已建立 `thought_streams`、`thought_stream_epochs`、带 Stream/Epoch/Turn 顺序的 `thought_runs`，以及与实际副作用分离的 `action_proposals`。`llm_calls.purpose` 区分 primary、工具续轮、compiler、revision 和 compression；消息使用 `author_kind`、`direction`、平台消息 ID 与 receipt 表达用户、Asuka 和平台回显。
+Migration `0006_glorious_rictor` 已建立 `thought_streams`、`thought_stream_epochs`、带 Stream/Epoch/Turn 顺序的 `thought_runs`，以及与实际副作用分离的 `action_proposals`。后续迁移加入 primary/compiler 检查点和 `outbound_policies / speech_decisions / outbound_deliveries`。`llm_calls.purpose` 区分 primary、工具续轮、compiler、revision 和 compression；消息使用 `author_kind`、`direction`、平台消息 ID 与 receipt 表达用户、Asuka 和平台回显。
 
 上下文 projector 已按 Stream 读取初始化历史并集、当前 Epoch 已提交 Turn、压缩输出和本轮新消息。它以模型配置的 `context_window` 计算预算，先裁剪可选历史/低相关记忆，再按时间将必选新消息分块；每块成功后才推进到该块末尾。每次供应商实际收到的 messages 和所引用的 context items 都写入 `llm_calls`，可由 inspector 精确重放。当前正式 memory store 尚未实现，因此 recalled-memory 段保持为空，但顺序和预算接口已经固定。
 
@@ -59,7 +60,7 @@ sent_at / conversation_type(group|private) / content
 - 第一人称默认指向当前 `sender_id`，不得把不同用户的信息合并；
 - `author_kind=agent` 或 `sender_id=agent-asuka` 表示 Asuka 自己此前说的话；
 - 转述对象不明确时保持 unresolved，不猜测最近发言者；
-- NapCat 自身回显不能作为唯一的 Agent 历史来源。未来发送链路必须将 Asuka 的 outbound message 作为正式消息持久化，并对平台回显幂等去重。
+- NapCat 自身回显不能作为唯一的 Agent 历史来源。当前发送链路会在调用 NapCat 前将 Asuka 的 outbound message 正式持久化，并用唯一 delivery/echo 对平台结果做幂等关联。
 
 ### 上下文顺序
 
@@ -137,6 +138,12 @@ fast 模型接收：主模型完整输出、可引用 message/memory/source mani
 - accepted action 先落为 proposal。发送、记忆激活和其他副作用由独立执行器处理。
 
 如果 primary 已成功而 compiler 暂时失败，应保存 primary 输出并从 compiler 阶段续跑，避免相同自然思绪被重复生成。只有 Turn 完整提交后才能推进消息 watermark；`no_action` 完成同样可以推进。
+
+### Speech：硬策略与唯一 executor
+
+`reply/no_action` proposal 完成后，worker 创建 `speech_decisions`。硬策略不调用模型，依次检查总开关、Channel、QQ 白名单、目标、证据、时效、重复、静默时段、每日额度、会话冷却和 `shadow|active` 模式。只有 `speak` 会先原子创建本地 outbound message 与 delivery；NapCat gateway 是唯一允许执行 OneBot send action 的进程。
+
+每个 proposal 只能对应一个 decision 和 delivery，稳定 `echo` 关联 OneBot 响应。发送后没有收到明确响应时进入 `failed_uncertain` 且不自动重试，避免重复群消息。完整协议和示例见 [`autonomous-speech.md`](autonomous-speech.md)。
 
 ## 压缩与新 Epoch
 

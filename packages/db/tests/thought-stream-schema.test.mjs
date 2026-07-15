@@ -11,6 +11,8 @@ const compilerMigrationUrl = new URL(
   "../drizzle-pg/0008_lethal_radioactive_man.sql",
   import.meta.url,
 );
+const outboundSnapshotUrl = new URL("../drizzle-pg/meta/0009_snapshot.json", import.meta.url);
+const outboundMigrationUrl = new URL("../drizzle-pg/0009_famous_legion.sql", import.meta.url);
 
 test("thought stream migration exposes the recoverable v2 contracts", async () => {
   const snapshot = JSON.parse(await readFile(snapshotUrl, "utf8"));
@@ -69,4 +71,24 @@ test("compiler and bounded revision checkpoints are persisted without backfill",
 test("internal-development migration does not backfill legacy test rows", async () => {
   const migration = await readFile(migrationUrl, "utf8");
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO)\s+"?(?:messages|thought_runs)"?/i);
+});
+
+test("autonomous speech uses a durable decision and single outbound queue", async () => {
+  const snapshot = JSON.parse(await readFile(outboundSnapshotUrl, "utf8"));
+  const tables = snapshot.tables;
+  const policy = tables["public.outbound_policies"];
+  const decision = tables["public.speech_decisions"];
+  const delivery = tables["public.outbound_deliveries"];
+
+  assert.ok(policy);
+  assert.ok(decision);
+  assert.ok(delivery);
+  assert.equal(policy.columns.enabled.default, false);
+  assert.ok(decision.indexes.speech_decisions_proposal_uidx.isUnique);
+  assert.ok(delivery.indexes.outbound_deliveries_decision_uidx.isUnique);
+  assert.ok(delivery.indexes.outbound_deliveries_echo_uidx.isUnique);
+
+  const migration = await readFile(outboundMigrationUrl, "utf8");
+  assert.match(migration, /'agent-asuka', false, 'Asia\/Shanghai'/);
+  assert.doesNotMatch(migration, /UPDATE\s+"?(?:messages|thought_runs|action_proposals)"?/i);
 });
