@@ -23,7 +23,7 @@
     "lint": "bash scripts/sites-env.sh -- eslint .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "check:boundaries": "node scripts/check-workspace-boundaries.mjs",
-    "test:unit": "npm run test --workspace @asuka-agent/agent-core && npm run test --workspace @asuka-agent/im",
+    "test:unit": "npm run test --workspace @asuka-agent/agent-core && npm run test --workspace @asuka-agent/im && npm run test --workspace @asuka-agent/llm && npm run test --workspace @asuka-agent/control-api",
     "test:web": "npm run test --workspace @asuka-agent/web",
     "test": "npm run build && npm run test:unit && npm run test:web",
     "validate:artifact": "bash scripts/validate-artifact.sh",

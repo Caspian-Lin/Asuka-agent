@@ -9,6 +9,7 @@ import {
 } from "react";
 import ImChannelPage from "@/app/components/im-channel-page";
 import JobsPage from "@/app/components/jobs-page";
+import LlmSettingsPanel from "@/app/components/llm-settings-panel";
 
 type ViewKey =
   | "chat"
@@ -589,7 +590,9 @@ export default function AgentConsole() {
 
         {activeView === "settings" && (
           <section className="page-panel settings-page">
-            <div className="page-hero"><div><span className="section-kicker">Policy controls</span><h1>运行策略</h1><p>第一阶段默认禁止自主外发；先通过人工复核积累安全、可解释的决策数据。</p></div></div>
+            <div className="page-hero"><div><span className="section-kicker">Agent configuration</span><h1>设置</h1><p>分别管理模型能力与运行边界。模型不可用不会阻断 QQ 消息入站和持久化。</p></div></div>
+            <LlmSettingsPanel />
+            <div className="settings-section-head policy-section-head"><div><h2>运行策略</h2><p>第一阶段默认禁止自主外发；先通过人工复核积累安全、可解释的决策数据。</p></div></div>
             <form className="settings-grid" onSubmit={saveSettings}>
               <article className="settings-card wide">
                 <div><span className="settings-icon">◌</span><div><h2>Shadow Mode</h2><p>生成思绪与发送决策，但不对外主动发言。</p></div></div>
@@ -597,7 +600,7 @@ export default function AgentConsole() {
               </article>
               <article className="settings-card"><div><span className="settings-icon cyan">☾</span><div><h2>安静时段</h2><p>即使未来允许主动发送，也应避免打扰。</p></div></div><div className="time-range"><label>开始<input name="quietHoursStart" type="time" defaultValue={snapshot.settings.quietHoursStart} /></label><span>→</span><label>结束<input name="quietHoursEnd" type="time" defaultValue={snapshot.settings.quietHoursEnd} /></label></div></article>
               <article className="settings-card"><div><span className="settings-icon rose">↗</span><div><h2>每日主动预算</h2><p>限制主动触达次数，避免“人格感”退化成打扰。</p></div></div><label className="budget-input"><input name="dailyProactiveBudget" type="number" min="0" max="20" defaultValue={snapshot.settings.dailyProactiveBudget} /><span>次 / 天</span></label></article>
-              <article className="settings-card"><div><span className="settings-icon">⌁</span><div><h2>推理适配器</h2><p>MVP 不依赖外部密钥，可稳定复现数据链路。</p></div></div><div className="read-only-value"><span className="status-dot" />{snapshot.settings.modelMode}</div></article>
+              <article className="settings-card"><div><span className="settings-icon">⌁</span><div><h2>Web 演示引擎</h2><p>现有 Web 对话仍使用可复现的确定性引擎；真实模型由上方双档 adapter 提供。</p></div></div><div className="read-only-value"><span className="status-dot" />{snapshot.settings.modelMode}</div></article>
               <article className="settings-card danger-zone"><div><span className="settings-icon rose">↺</span><div><h2>恢复演示数据</h2><p>清除本次实验新增内容，回到三个固定评测样本。</p></div></div><button type="button" className="ghost-button reject" onClick={resetDemo} disabled={busy === "reset"}>{busy === "reset" ? "恢复中…" : "恢复初始状态"}</button></article>
               <div className="settings-submit"><span>策略变更会保存在 D1，并在下一轮生效。</span><button className="primary-button" disabled={busy === "settings"}>{busy === "settings" ? "保存中…" : "保存设置"}</button></div>
             </form>

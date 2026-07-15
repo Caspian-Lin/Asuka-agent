@@ -1,10 +1,10 @@
 # Asuka Agent：需求与开发设计文档
 
-> 文档版本：0.2.1（Phase 2 Monorepo 基础）
+> 文档版本：0.3.0（Phase 2 双档 LLM 配置）
 >
 > 更新时间：2026-07-15
 >
-> 状态：第一阶段已实现；NapCat QQ 入站、IM Channel、任务控制面与 Monorepo 基础已进入本地验证
+> 状态：第一阶段已实现；NapCat QQ 入站、IM Channel、任务控制面、Monorepo 与双档 LLM 配置已进入本地验证
 >
 > 配套实现：`Asuka Agent`
 
@@ -285,7 +285,7 @@ packages/
   db/                     D1/PostgreSQL schema、migration、数据库脚本
   im/                     QQ/OneBot 消息标准化
   config/                 进程环境变量解析与校验
-  llm/                    primary/fast LLM adapter 契约
+  llm/                    primary/fast LLM adapter、校验与密钥加密
   shared/                 稳定通用代码
 docs/
   requirements-and-development.md
@@ -471,7 +471,7 @@ outbound_deliveries  平台 message id、状态、撤回信息
 agent_runs           父/子 Agent 运行树、预算、状态
 ```
 
-当前已通过 PostgreSQL migration 实现 `channels`、`inbound_deliveries`、`jobs`、`job_runs`，并在 `messages` 增加逐条 `read_at`。`outbound_*`、工具和子 Agent 表仍未开放。IM 会话通过正式 `channel_id` 外键归属 Channel；禁止解析拼接 ID 代替关系。
+当前已通过 PostgreSQL migration 实现 `channels`、`inbound_deliveries`、`jobs`、`job_runs`、`llm_profile_settings`，并在 `messages` 增加逐条 `read_at`。`outbound_*`、工具和子 Agent 表仍未开放。IM 会话通过正式 `channel_id` 外键归属 Channel；禁止解析拼接 ID 代替关系。模型配置以 `(agent_id, profile)` 为主键，profile 仅允许 `primary | fast`；API Key 使用服务端 `SETTINGS_ENCRYPTION_KEY` 加密，数据库只保存 AES-256-GCM envelope。
 
 ## 9. API 设计
 
@@ -495,6 +495,10 @@ agent_runs           父/子 Agent 运行树、预算、状态
 | GET | `/api/im` | 查询 Channel、群会话、历史消息和未读数 |
 | POST | `/api/im/read` | 将指定会话的入站用户消息标为已读 |
 | GET | `/api/jobs` | 查询系统托管任务、规划任务和最近运行 |
+| GET | `/api/llm/settings` | 查询双档配置与 Key 状态，不返回密钥或掩码原文 |
+| PUT | `/api/llm/settings/:profile` | 保存 `primary | fast` 配置；空 Key 保留原值 |
+| POST | `/api/llm/settings/:profile/test` | 独立测试已保存配置，返回模型、延迟与 token 审计字段 |
+| DELETE | `/api/llm/settings/:profile/key` | 经明确确认删除 Key，并停用该档位 |
 
 错误响应：
 
@@ -853,7 +857,9 @@ make test
 
 ### 17.3 新增真实模型 adapter
 
-不要直接在 `agent-service.ts` 调模型。定义：
+基础 `LlmProvider` 已由 `packages/llm` 实现，业务层必须显式传入 `primary | fast`，不得隐式降级。OpenAI-compatible adapter 返回 `model/latency/token_usage` 审计字段，配置缺失或连接失败只影响当前模型调用，不影响 QQ 入站落库。
+
+不要直接在 `agent-service.ts` 调模型。领域层继续定义：
 
 ```ts
 interface CognitionAdapter {

@@ -50,3 +50,6 @@ next-env.d.ts
 **/.vinext/
 /outputs/
 /work/
+
+# Impeccable live mode keeps only its reusable config in Git.
+/.impeccable/live/sessions/
