@@ -6,6 +6,7 @@ import {
   encryptApiKey,
   LlmConfigurationError,
   OpenAiCompatibleProvider,
+  openAiCompatibleDialect,
   parseEncryptionKey,
   validateLlmSettings,
 } from "../src/runtime.mjs";
@@ -78,6 +79,65 @@ test("provider routes by explicit profile and returns audit metadata", async () 
   assert.deepEqual(
     { model: response.model, inputTokens: response.inputTokens, outputTokens: response.outputTokens },
     { model: "fast-model-2026", inputTokens: 4, outputTokens: 1 },
+  );
+});
+
+test("DashScope JSON Object mode receives the exact schema with thinking disabled", async () => {
+  const calls = [];
+  const provider = new OpenAiCompatibleProvider({
+    loadProfile: async () => ({
+      enabled: true,
+      baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      modelId: "qwen3.6-flash-2026-04-16",
+      apiKey: "never-log-this",
+    }),
+    fetchImpl: async (_url, init) => {
+      calls.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: "{\"ok\":true}" } }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+  });
+  const result = await provider.complete({
+    profile: "fast",
+    messages: [{ role: "user", content: "Return the requested result." }],
+    responseSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { ok: { type: "boolean" } },
+      required: ["ok"],
+    },
+  });
+  assert.equal(openAiCompatibleDialect(
+    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  ), "dashscope-chat");
+  assert.deepEqual(calls[0].response_format, { type: "json_object" });
+  assert.equal(calls[0].enable_thinking, false);
+  assert.equal(Object.hasOwn(calls[0].response_format, "json_schema"), false);
+  assert.match(calls[0].messages[0].content, /JSON/);
+  assert.match(calls[0].messages[0].content, /"additionalProperties":false/);
+  assert.match(calls[0].messages[0].content, /"required":\["ok"\]/);
+  assert.deepEqual(result.requestMessages, calls[0].messages);
+  assert.equal(calls[0].messages[1].content, "Return the requested result.");
+});
+
+test("provider HTTP errors retain a redacted actionable detail", async () => {
+  const provider = new OpenAiCompatibleProvider({
+    loadProfile: async () => ({
+      enabled: true,
+      baseUrl: "https://models.example/v1",
+      modelId: "model",
+      apiKey: "never-log-this",
+    }),
+    fetchImpl: async () => new Response(JSON.stringify({
+      error: { message: "Unknown response_format for sk-secret-credential" },
+    }), { status: 400, headers: { "Content-Type": "application/json" } }),
+  });
+  await assert.rejects(
+    provider.complete({ profile: "fast", messages: [] }),
+    (error) => error.code === "provider_http_400" &&
+      error.message.includes("Unknown response_format") &&
+      !error.message.includes("sk-secret-credential"),
   );
 });
 

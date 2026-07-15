@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Runnable processes live in `apps/`: `web`, `control-api`, `napcat-gateway`, and `agent-worker`. Reusable code belongs in `packages/`: `agent-core`, `db`, `im`, `config`, `llm`, and `shared`. Tests live with their workspace. PostgreSQL and D1 schemas/migrations are owned only by `packages/db/`. Root `scripts/` and `Makefile` orchestrate workspaces. Treat `docs/requirements-and-development.md` as the core product and architecture reference; review it before changes.
+Runnable processes live in `apps/`: `web`, `control-api`, `napcat-gateway`, and `agent-worker`. Reusable code belongs in `packages/`: `agent-core`, `db`, `im`, `config`, `llm`, and `shared`. Tests live with their workspace. PostgreSQL schemas and migrations are owned only by `packages/db/`; no second application database is allowed. Root `scripts/` and `Makefile` orchestrate workspaces. Treat `docs/requirements-and-development.md` as the core product and architecture reference; review it before changes.
 
 ## Build, Test, and Development Commands
 
@@ -28,7 +28,7 @@ Tests use Node's built-in runner and follow `<workspace>/tests/*.test.mjs`. Add 
 
 ## Standard Development Workflow
 
-Create the issue and milestone first with `gh issue create` and `gh api`. Start standalone `feature/<issue>-<slug>` or `milestone/<slug>` branches from an updated `dev`. For milestone work, branch features from the milestone branch and open PRs back to that branch; standalone features target `dev`. After implementation, push and open a PR. Wait for all CI checks, then wait for the repository owner's explicit confirmation before merging.
+Create the issue and milestone first with `gh issue create` and `gh api`. When creating an issue, add the most relevant existing labels; if none fit, confirm before creating a new label. Start standalone `feature/<issue>-<slug>` or `milestone/<slug>` branches from an updated `dev`. For milestone work, branch features from the milestone branch and open PRs back to that branch; standalone features target `dev`. After implementation, push and open a PR. Wait for all CI checks, then wait for the repository owner's explicit confirmation before merging.
 
 Run GitHub-facing `gh` operations outside the sandbox with elevated network access, including authentication checks, API calls, issue/PR operations, and CI checks. A sandboxed `gh auth status` may incorrectly report an invalid token; do not treat that result as the real authentication state.
 

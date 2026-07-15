@@ -160,6 +160,82 @@ export function decryptApiKey(envelope, encryptionKey) {
   }
 }
 
+export function openAiCompatibleDialect(baseUrl) {
+  let hostname = "";
+  try {
+    hostname = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return "openai";
+  }
+  return (/^dashscope(?:-[a-z0-9-]+)?\.aliyuncs\.com$/.test(hostname) ||
+      hostname.endsWith(".maas.aliyuncs.com"))
+    ? "dashscope-chat"
+    : "openai";
+}
+
+function structuredOutputParameters(baseUrl, responseSchema) {
+  if (!responseSchema) return {};
+  if (openAiCompatibleDialect(baseUrl) === "dashscope-chat") {
+    // DashScope Chat Completions accepts JSON Object mode rather than
+    // OpenAI's json_schema mode. Qwen 3.6 enables thinking by default, while
+    // DashScope rejects JSON mode when thinking is enabled.
+    return {
+      response_format: { type: "json_object" },
+      enable_thinking: false,
+    };
+  }
+  return {
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "asuka_response",
+        strict: true,
+        schema: responseSchema,
+      },
+    },
+  };
+}
+
+function structuredOutputMessages(baseUrl, responseSchema, messages) {
+  if (!responseSchema || openAiCompatibleDialect(baseUrl) !== "dashscope-chat") {
+    return messages;
+  }
+  // DashScope's json_object mode guarantees JSON syntax, but it does not accept
+  // OpenAI's json_schema payload or enforce the requested fields. Put the exact
+  // schema in the prompt so Qwen does not have to infer the business contract.
+  return [
+    {
+      role: "system",
+      content: [
+        "Return only one valid JSON object.",
+        "It must match this JSON Schema exactly; include every required field, use only allowed enum values, and do not add fields:",
+        JSON.stringify(responseSchema),
+      ].join("\n"),
+    },
+    ...messages,
+  ];
+}
+
+function redactProviderDetail(value) {
+  if (typeof value !== "string") return null;
+  const normalized = value
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, "[redacted]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized ? normalized.slice(0, 300) : null;
+}
+
+async function providerErrorDetail(response) {
+  try {
+    const payload = await response.json();
+    return redactProviderDetail(
+      payload?.error?.message ?? payload?.message ?? payload?.error_description,
+    );
+  } catch {
+    return null;
+  }
+}
+
 export class OpenAiCompatibleProvider {
   constructor({ loadProfile, fetchImpl = globalThis.fetch, timeoutMs = 15_000 }) {
     this.loadProfile = loadProfile;
@@ -179,6 +255,11 @@ export class OpenAiCompatibleProvider {
     if (!configuration.apiKey) {
       throw new LlmConfigurationError("api_key_missing", `${profile} 模型缺少 API Key`, 503);
     }
+    const requestMessages = structuredOutputMessages(
+      configuration.baseUrl,
+      request.responseSchema,
+      request.messages,
+    );
     const startedAt = performance.now();
     let response;
     try {
@@ -192,22 +273,14 @@ export class OpenAiCompatibleProvider {
           },
           body: JSON.stringify({
             model: configuration.modelId,
-            messages: request.messages,
+            messages: requestMessages,
             ...(request.maxOutputTokens
               ? { max_tokens: request.maxOutputTokens }
               : {}),
-            ...(request.responseSchema
-              ? {
-                  response_format: {
-                    type: "json_schema",
-                    json_schema: {
-                      name: "asuka_response",
-                      strict: true,
-                      schema: request.responseSchema,
-                    },
-                  },
-                }
-              : {}),
+            ...structuredOutputParameters(
+              configuration.baseUrl,
+              request.responseSchema,
+            ),
           }),
           signal: AbortSignal.timeout(this.timeoutMs),
         },
@@ -222,11 +295,12 @@ export class OpenAiCompatibleProvider {
     }
     const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
     if (!response.ok) {
+      const detail = await providerErrorDetail(response);
       throw new LlmConfigurationError(
         `provider_http_${response.status}`,
         response.status === 401 || response.status === 403
           ? "模型服务拒绝了 API Key"
-          : `模型服务返回 HTTP ${response.status}`,
+          : `模型服务返回 HTTP ${response.status}${detail ? `：${detail}` : ""}`,
         502,
       );
     }
@@ -258,6 +332,7 @@ export class OpenAiCompatibleProvider {
         ? payload.usage.completion_tokens
         : undefined,
       latencyMs,
+      requestMessages,
     };
   }
 }

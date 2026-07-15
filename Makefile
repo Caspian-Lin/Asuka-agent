@@ -15,7 +15,7 @@ help: ## 显示可用命令
 install: ## 按 package-lock.json 安装依赖
 	$(NPM) ci
 
-frontend: web ## 启动 Web 前端及其 API 路由
+frontend: web ## 启动只读 PostgreSQL 控制台前端
 
 web: ## 启动 Vinext/Vite 开发服务器（默认端口 3000）
 	$(NPM) run dev:web -- --port $(WEB_PORT)

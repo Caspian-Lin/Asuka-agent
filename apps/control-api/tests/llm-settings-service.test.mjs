@@ -97,7 +97,7 @@ test("connection tests return audit metadata without response content", async ()
       requestBody = JSON.parse(init.body);
       return new Response(JSON.stringify({
         model: "asuka-primary-2026",
-        choices: [{ message: { content: "OK secret response" } }],
+        choices: [{ message: { content: "{\"ok\":true}" } }],
         usage: { prompt_tokens: 5, completion_tokens: 2 },
       }), { status: 200, headers: { "Content-Type": "application/json" } });
     },
@@ -107,6 +107,7 @@ test("connection tests return audit metadata without response content", async ()
   assert.equal(result.status, "success");
   assert.equal(result.model, "asuka-primary-2026");
   assert.equal(requestBody.max_tokens, 64);
+  assert.equal(requestBody.response_format.type, "json_schema");
   assert.equal(Object.hasOwn(result, "content"), false);
   assert.equal(repository.rows.get("primary").last_test_status, "success");
 });

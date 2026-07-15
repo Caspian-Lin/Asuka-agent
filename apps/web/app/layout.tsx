@@ -14,10 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Asuka Agent",
-  description: "可追溯、可评测、支持 IM Channel 的持续型聊天 Agent。",
-  other: {
-    "codex-preview": "development",
-  },
+  description: "可追溯、支持 IM Channel 与长期认知审计的持续型聊天 Agent。",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

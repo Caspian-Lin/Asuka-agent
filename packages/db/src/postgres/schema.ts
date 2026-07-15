@@ -100,6 +100,27 @@ export const conversations = pgTable(
   ],
 );
 
+export const conversationParticipants = pgTable(
+  "conversation_participants",
+  {
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    participantId: text("participant_id").notNull(),
+    displayName: text("display_name").notNull(),
+    aliases: jsonb("aliases").notNull().default([]),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.conversationId, table.participantId] }),
+    index("conversation_participants_last_seen_idx").on(
+      table.conversationId,
+      table.lastSeenAt,
+    ),
+  ],
+);
+
 export const messages = pgTable(
   "messages",
   {
@@ -109,6 +130,9 @@ export const messages = pgTable(
       .references(() => conversations.id, { onDelete: "cascade" }),
     role: text("role").notNull(),
     content: text("content").notNull(),
+    senderId: text("sender_id"),
+    senderDisplayName: text("sender_display_name"),
+    replyToExternalMessageId: text("reply_to_external_message_id"),
     citationsJson: jsonb("citations_json").notNull().default([]),
     correlationId: text("correlation_id").notNull(),
     readAt: timestamp("read_at", { withTimezone: true }),
@@ -122,6 +146,7 @@ export const messages = pgTable(
     index("messages_unread_idx")
       .on(table.conversationId, table.createdAt)
       .where(sql`${table.role} = 'user' and ${table.readAt} is null`),
+    index("messages_sender_idx").on(table.conversationId, table.senderId),
   ],
 );
 
@@ -227,14 +252,231 @@ export const jobRuns = pgTable(
     status: text("status").notNull(),
     triggerType: text("trigger_type").notNull(),
     idempotencyKey: text("idempotency_key").notNull(),
-    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    correlationId: text("correlation_id").notNull(),
+    scheduledFor: timestamp("scheduled_for", { withTimezone: true }),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     errorCode: text("error_code"),
     errorMessage: text("error_message"),
     metrics: jsonb("metrics").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },
   (table) => [
     uniqueIndex("job_runs_idempotency_uidx").on(table.idempotencyKey),
     index("job_runs_job_time_idx").on(table.jobId, table.startedAt),
+    index("job_runs_claim_idx").on(
+      table.status,
+      table.availableAt,
+      table.leaseExpiresAt,
+    ),
+  ],
+);
+
+/** One inspectable cognition process for one conversation and trigger. */
+export const thoughtRuns = pgTable(
+  "thought_runs",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    jobRunId: text("job_run_id")
+      .notNull()
+      .references(() => jobRuns.id, { onDelete: "cascade" }),
+    correlationId: text("correlation_id").notNull(),
+    triggerType: text("trigger_type").notNull(),
+    triggerReason: text("trigger_reason").notNull(),
+    status: text("status").notNull(),
+    decision: text("decision"),
+    summary: text("summary"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("thought_runs_job_conversation_uidx").on(
+      table.jobRunId,
+      table.conversationId,
+    ),
+    index("thought_runs_conversation_time_idx").on(
+      table.conversationId,
+      table.createdAt,
+    ),
+    index("thought_runs_trigger_time_idx").on(table.triggerType, table.createdAt),
+  ],
+);
+
+export const jobConversationWatermarks = pgTable(
+  "job_conversation_watermarks",
+  {
+    jobId: text("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
+    lastMessageId: text("last_message_id"),
+    lastSuccessRunId: text("last_success_run_id")
+      .references(() => jobRuns.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.jobId, table.conversationId] })],
+);
+
+export const operationalThoughts = pgTable(
+  "operational_thoughts",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    jobRunId: text("job_run_id")
+      .notNull()
+      .references(() => jobRuns.id, { onDelete: "cascade" }),
+    thoughtRunId: text("thought_run_id")
+      .notNull()
+      .references(() => thoughtRuns.id, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    intent: text("intent").notNull(),
+    basis: text("basis").notNull(),
+    evidenceMessageIds: jsonb("evidence_message_ids").notNull(),
+    confidenceMillis: integer("confidence_millis").notNull(),
+    risk: text("risk").notNull(),
+    decision: text("decision").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("operational_thoughts_idempotency_uidx").on(table.idempotencyKey),
+    uniqueIndex("operational_thoughts_thought_run_uidx").on(table.thoughtRunId),
+    index("operational_thoughts_conversation_time_idx").on(
+      table.conversationId,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const memoryCandidates = pgTable(
+  "memory_candidates",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    jobRunId: text("job_run_id")
+      .notNull()
+      .references(() => jobRuns.id, { onDelete: "cascade" }),
+    thoughtRunId: text("thought_run_id")
+      .notNull()
+      .references(() => thoughtRuns.id, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    operation: text("operation").notNull(),
+    subjectId: text("subject_id"),
+    sourceSpeakerId: text("source_speaker_id").notNull(),
+    claim: text("claim").notNull(),
+    evidenceMessageIds: jsonb("evidence_message_ids").notNull(),
+    confidenceMillis: integer("confidence_millis").notNull(),
+    attributionStatus: text("attribution_status").notNull(),
+    targetCandidateId: text("target_candidate_id"),
+    status: text("status").notNull().default("pending_review"),
+    promptVersion: text("prompt_version").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("memory_candidates_idempotency_uidx").on(table.idempotencyKey),
+    index("memory_candidates_conversation_time_idx").on(
+      table.conversationId,
+      table.createdAt,
+    ),
+    index("memory_candidates_subject_idx").on(
+      table.conversationId,
+      table.subjectId,
+      table.status,
+    ),
+    index("memory_candidates_thought_run_idx").on(table.thoughtRunId),
+  ],
+);
+
+export const llmCalls = pgTable(
+  "llm_calls",
+  {
+    id: text("id").primaryKey(),
+    jobRunId: text("job_run_id")
+      .notNull()
+      .references(() => jobRuns.id, { onDelete: "cascade" }),
+    thoughtRunId: text("thought_run_id")
+      .notNull()
+      .references(() => thoughtRuns.id, { onDelete: "cascade" }),
+    conversationId: text("conversation_id")
+      .references(() => conversations.id, { onDelete: "set null" }),
+    correlationId: text("correlation_id").notNull(),
+    profile: llmProfile("profile").notNull(),
+    provider: text("provider").notNull(),
+    model: text("model"),
+    promptVersion: text("prompt_version").notNull(),
+    inputHash: text("input_hash").notNull(),
+    outputHash: text("output_hash"),
+    status: text("status").notNull(),
+    errorCode: text("error_code"),
+    latencyMs: integer("latency_ms"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    sequenceNumber: integer("sequence_number").notNull().default(1),
+    requestContext: jsonb("request_context").notNull().default([]),
+    responseJson: jsonb("response_json"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    index("llm_calls_run_idx").on(table.jobRunId, table.createdAt),
+    uniqueIndex("llm_calls_thought_sequence_uidx").on(
+      table.thoughtRunId,
+      table.sequenceNumber,
+    ),
+  ],
+);
+
+/** Structured references available to a specific model round. */
+export const llmCallContextItems = pgTable(
+  "llm_call_context_items",
+  {
+    id: text("id").primaryKey(),
+    llmCallId: text("llm_call_id")
+      .notNull()
+      .references(() => llmCalls.id, { onDelete: "cascade" }),
+    ordinal: integer("ordinal").notNull(),
+    itemType: text("item_type").notNull(),
+    referenceId: text("reference_id"),
+    title: text("title").notNull(),
+    content: text("content"),
+    metadata: jsonb("metadata").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("llm_call_context_items_ordinal_uidx").on(
+      table.llmCallId,
+      table.ordinal,
+    ),
+    index("llm_call_context_items_reference_idx").on(
+      table.itemType,
+      table.referenceId,
+    ),
   ],
 );

@@ -13,7 +13,7 @@ node_modules/
 # testing
 /coverage
 
-# local SQLite / D1 runtime data
+# local database artifacts
 *.db
 *.db-shm
 *.db-wal
@@ -45,9 +45,8 @@ yarn-error.log*
 next-env.d.ts
 *.tsbuildinfo
 **/dist/
-**/.wrangler/
-/.sites-runtime/
 **/.vinext/
+/.sites-runtime/
 /outputs/
 /work/
 
