@@ -36,6 +36,10 @@ import {
   validateCompilerOutput,
 } from "@asuka-agent/agent-core/action-compiler";
 import {
+  evaluateSpeechPolicy,
+  speechContentHash,
+} from "@asuka-agent/agent-core/outbound-policy";
+import {
   decryptApiKey,
   LlmConfigurationError,
   OpenAiCompatibleProvider,
@@ -1566,6 +1570,236 @@ export function createCognitionWorker({
     };
   }
 
+  function outboundPolicyFromRow(row) {
+    return {
+      enabled: row.policy_enabled === true,
+      timezone: String(row.policy_timezone ?? "Asia/Shanghai"),
+      quietStartMinute: Number(row.quiet_start_minute ?? 0),
+      quietEndMinute: Number(row.quiet_end_minute ?? 0),
+      dailyBudget: Number(row.daily_budget ?? 10),
+      cooldownSeconds: Number(row.cooldown_seconds ?? 300),
+      duplicateWindowSeconds: Number(row.duplicate_window_seconds ?? 86_400),
+      freshnessSeconds: Number(row.freshness_seconds ?? 1_800),
+    };
+  }
+
+  function conversationAllowlisted(row) {
+    const externalId = String(row.external_conversation_id ?? "");
+    const config = row.channel_config ?? {};
+    if (externalId.startsWith("group:")) {
+      return Array.isArray(config.groupWhitelist) &&
+        config.groupWhitelist.map(String).includes(externalId.slice("group:".length));
+    }
+    if (externalId.startsWith("private:")) {
+      return Array.isArray(config.privateUserWhitelist) &&
+        config.privateUserWhitelist.map(String).includes(externalId.slice("private:".length));
+    }
+    return false;
+  }
+
+  async function loadSpeechProposalRows({ thoughtRunId = null, deferredOnly = false } = {}) {
+    return sql`
+      SELECT proposal.id AS proposal_id, proposal.proposal_type,
+             proposal.payload, proposal.evidence_references, proposal.created_at,
+             thought.id AS thought_run_id, thought.agent_id, thought.compiled_at,
+             thought.correlation_id, conversation.id AS conversation_id,
+             conversation.external_id AS external_conversation_id,
+             conversation.channel_id, channel.enabled AS channel_enabled,
+             channel.config AS channel_config, agent.mode AS agent_mode,
+             policy.enabled AS policy_enabled, policy.timezone AS policy_timezone,
+             policy.quiet_start_minute, policy.quiet_end_minute,
+             policy.daily_budget, policy.cooldown_seconds,
+             policy.duplicate_window_seconds, policy.freshness_seconds,
+             decision.id AS decision_id, decision.outcome AS existing_outcome,
+             decision.evaluation_count
+      FROM action_proposals AS proposal
+      JOIN thought_runs AS thought ON thought.id = proposal.thought_run_id
+      JOIN conversations AS conversation ON conversation.id = thought.conversation_id
+      JOIN agents AS agent ON agent.id = thought.agent_id
+      LEFT JOIN channels AS channel ON channel.id = conversation.channel_id
+      LEFT JOIN outbound_policies AS policy ON policy.agent_id = thought.agent_id
+      LEFT JOIN speech_decisions AS decision ON decision.proposal_id = proposal.id
+      WHERE proposal.proposal_type IN ('reply', 'no_action')
+        AND (${thoughtRunId}::text IS NULL OR thought.id = ${thoughtRunId})
+        AND (
+          (${deferredOnly} = false AND decision.id IS NULL)
+          OR (${deferredOnly} = true AND decision.outcome = 'defer'
+              AND decision.next_evaluation_at <= ${clock()})
+        )
+      ORDER BY proposal.created_at
+      LIMIT 50
+    `;
+  }
+
+  async function speechPolicyStats(row, contentHash, policy) {
+    const now = clock();
+    const duplicateAfter = new Date(
+      now.getTime() - Math.max(0, policy.duplicateWindowSeconds) * 1_000,
+    );
+    const rows = await sql`
+      SELECT
+        count(*) FILTER (
+          WHERE outcome IN ('speak', 'shadow_speak')
+            AND created_at >= (
+              date_trunc('day', ${now} AT TIME ZONE ${policy.timezone})
+              AT TIME ZONE ${policy.timezone}
+            )
+        )::int AS sent_today,
+        max(created_at) FILTER (
+          WHERE outcome IN ('speak', 'shadow_speak')
+            AND conversation_id = ${row.conversation_id}
+        ) AS last_spoken_at,
+        bool_or(
+          content_hash = ${contentHash}
+          AND conversation_id = ${row.conversation_id}
+          AND created_at >= ${duplicateAfter}
+          AND outcome IN ('speak', 'shadow_speak')
+          AND id <> COALESCE(${row.decision_id}, '')
+        ) AS duplicate_seen
+      FROM speech_decisions
+      WHERE agent_id = ${row.agent_id}
+    `;
+    return {
+      sentToday: Number(rows[0].sent_today ?? 0),
+      lastSpokenAt: rows[0].last_spoken_at,
+      duplicateSeen: rows[0].duplicate_seen === true,
+    };
+  }
+
+  async function persistSpeechDecision(row, evaluation, policy, stats) {
+    const now = clock();
+    const draft = String(row.payload?.content ?? "");
+    const contentHash = speechContentHash(draft);
+    const decisionId = row.decision_id ?? `speech-decision:${row.proposal_id}`;
+    const policySnapshot = {
+      agentMode: row.agent_mode,
+      ...policy,
+      channelEnabled: row.channel_enabled === true,
+      allowlisted: conversationAllowlisted(row),
+      sentToday: stats.sentToday,
+      lastSpokenAt: stats.lastSpokenAt,
+      duplicateSeen: stats.duplicateSeen,
+    };
+    return sql.begin(async (tx) => {
+      const decisions = await tx`
+        INSERT INTO speech_decisions (
+          id, agent_id, thought_run_id, proposal_id, conversation_id,
+          outcome, reason_code, draft, content_hash, evidence_references,
+          policy_snapshot, next_evaluation_at, evaluation_count,
+          created_at, updated_at
+        ) VALUES (
+          ${decisionId}, ${row.agent_id}, ${row.thought_run_id}, ${row.proposal_id},
+          ${row.conversation_id}, ${evaluation.outcome}, ${evaluation.reasonCode},
+          ${draft}, ${contentHash}, ${tx.json(row.evidence_references ?? [])},
+          ${tx.json(policySnapshot)}, ${evaluation.nextEvaluationAt}, 1,
+          ${now}, ${now}
+        )
+        ON CONFLICT (proposal_id) DO UPDATE SET
+          outcome = EXCLUDED.outcome,
+          reason_code = EXCLUDED.reason_code,
+          policy_snapshot = EXCLUDED.policy_snapshot,
+          next_evaluation_at = EXCLUDED.next_evaluation_at,
+          evaluation_count = speech_decisions.evaluation_count + 1,
+          updated_at = EXCLUDED.updated_at
+        WHERE speech_decisions.outcome = 'defer'
+        RETURNING id, outcome
+      `;
+      if (!decisions[0]) return null;
+      const proposalStatus = evaluation.outcome === "speak" ||
+        evaluation.outcome === "shadow_speak"
+        ? "policy_approved"
+        : evaluation.outcome === "defer"
+          ? "proposed"
+          : row.proposal_type === "no_action"
+            ? "executed"
+            : "policy_rejected";
+      await tx`
+        UPDATE action_proposals
+        SET status = ${proposalStatus},
+            policy_reasons = ${tx.json([evaluation.reasonCode])}, updated_at = ${now}
+        WHERE id = ${row.proposal_id}
+      `;
+      if (evaluation.outcome === "speak") {
+        const messageId = `outbound-message:${row.proposal_id}`;
+        const deliveryId = `outbound-delivery:${row.proposal_id}`;
+        const echo = `outbound:${decisions[0].id}`;
+        await tx`
+          INSERT INTO messages (
+            id, conversation_id, role, author_kind, direction, content,
+            sender_id, sender_display_name, reply_to_external_message_id,
+            external_receipt, citations_json, correlation_id, read_at, created_at
+          ) VALUES (
+            ${messageId}, ${row.conversation_id}, 'assistant', 'agent', 'outbound',
+            ${draft}, 'agent-asuka', 'Asuka', ${row.payload?.replyToMessageId ?? null},
+            ${tx.json({ status: "queued", outboundDeliveryId: deliveryId })},
+            ${tx.json(row.evidence_references ?? [])}, ${row.correlation_id}, ${now}, ${now}
+          )
+          ON CONFLICT (id) DO NOTHING
+        `;
+        await tx`
+          INSERT INTO outbound_deliveries (
+            id, speech_decision_id, channel_id, conversation_id, message_id,
+            external_conversation_id, echo, status, available_at,
+            attempt_count, max_attempts, created_at, updated_at
+          ) VALUES (
+            ${deliveryId}, ${decisions[0].id}, ${row.channel_id},
+            ${row.conversation_id}, ${messageId}, ${row.external_conversation_id},
+            ${echo}, 'queued', ${now}, 0, 3, ${now}, ${now}
+          )
+          ON CONFLICT (speech_decision_id) DO NOTHING
+        `;
+      }
+      await tx`
+        INSERT INTO events (
+          id, conversation_id, event_type, source_type, payload_json,
+          correlation_id, created_at
+        ) VALUES (
+          ${`event:speech-decision:${decisions[0].id}:${decisions[0].outcome}`},
+          ${row.conversation_id}, 'speech_decision_evaluated', 'policy',
+          ${tx.json({
+            decisionId: decisions[0].id,
+            proposalId: row.proposal_id,
+            thoughtRunId: row.thought_run_id,
+            outcome: evaluation.outcome,
+            reasonCode: evaluation.reasonCode,
+          })}, ${row.correlation_id}, ${now}
+        )
+        ON CONFLICT (id) DO NOTHING
+      `;
+      return decisions[0];
+    });
+  }
+
+  async function evaluateSpeechRow(row) {
+    const policy = outboundPolicyFromRow(row);
+    const draft = String(row.payload?.content ?? "");
+    const contentHash = speechContentHash(draft);
+    const stats = await speechPolicyStats(row, contentHash, policy);
+    const evaluation = evaluateSpeechPolicy({
+      proposal: {
+        type: row.proposal_type,
+        conversationId: row.conversation_id,
+        targetConversationId: row.payload?.targetConversationId ?? null,
+        draft,
+        evidenceReferences: row.evidence_references,
+        createdAt: row.compiled_at ?? row.created_at,
+      },
+      agentMode: row.agent_mode,
+      policy,
+      channelEnabled: row.channel_enabled === true,
+      allowlisted: conversationAllowlisted(row),
+      now: clock(),
+      ...stats,
+    });
+    return persistSpeechDecision(row, evaluation, policy, stats);
+  }
+
+  async function processSpeechDecisions({ thoughtRunId = null, deferredOnly = false } = {}) {
+    const rows = await loadSpeechProposalRows({ thoughtRunId, deferredOnly });
+    for (const row of rows) await evaluateSpeechRow(row);
+    return rows.length;
+  }
+
   async function recordLlmCall({
     run,
     thoughtRunId,
@@ -1822,6 +2056,7 @@ export function createCognitionWorker({
         const saved = await loadPrimaryState(thoughtRun.id);
         if (saved.output) {
           await runActionCompiler({ run, thoughtRun, context });
+          await processSpeechDecisions({ thoughtRunId: thoughtRun.id });
           const completed = await completedThoughtMetrics(thoughtRun.id);
           return {
             messageCount: context.messages.filter((message) => (
@@ -1958,6 +2193,7 @@ export function createCognitionWorker({
           outputs,
         );
         await runActionCompiler({ run, thoughtRun, context });
+        await processSpeechDecisions({ thoughtRunId: thoughtRun.id });
         return {
           messageCount: context.messages.length,
           ...await completedThoughtMetrics(thoughtRun.id),
@@ -2025,12 +2261,27 @@ export function createCognitionWorker({
       const failure = cognitionError(error);
       await sql`
         UPDATE thought_runs
-        SET status = 'failed', processing_stage = 'failed',
+        SET status = CASE
+              WHEN compiler_status = 'accepted' THEN status
+              ELSE 'failed'
+            END,
+            processing_stage = CASE
+              WHEN compiler_status = 'accepted' THEN processing_stage
+              ELSE 'failed'
+            END,
             compiler_status = CASE
+              WHEN compiler_status = 'accepted' THEN compiler_status
               WHEN primary_output IS NOT NULL THEN ${failure.retryable ? "retrying" : "dead_letter"}
               ELSE compiler_status
             END,
-            summary = ${failure.message}, completed_at = ${clock()}
+            summary = CASE
+              WHEN compiler_status = 'accepted' THEN summary
+              ELSE ${failure.message}
+            END,
+            completed_at = CASE
+              WHEN compiler_status = 'accepted' THEN completed_at
+              ELSE ${clock()}
+            END
         WHERE id = ${thoughtRun.id}
       `;
       throw error;
@@ -2119,6 +2370,8 @@ export function createCognitionWorker({
   }
 
   async function runCycle() {
+    await processSpeechDecisions();
+    await processSpeechDecisions({ deferredOnly: true });
     await scheduleDueRuns();
     let processed = 0;
     while (processed < maxRunsPerCycle) {

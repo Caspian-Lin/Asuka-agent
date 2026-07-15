@@ -5,6 +5,10 @@ import { LlmConfigurationError } from "@asuka-agent/llm/runtime";
 import postgres from "postgres";
 import { createJobsService, JobRequestError } from "./jobs-service.mjs";
 import { createLlmSettingsService } from "./llm-settings-service.mjs";
+import {
+  createOutboundService,
+  OutboundRequestError,
+} from "./outbound-service.mjs";
 
 const host = process.env.CONTROL_API_HOST ?? "127.0.0.1";
 const port = positiveInteger(process.env, "CONTROL_API_PORT", 3002);
@@ -212,6 +216,140 @@ const jobsService = createJobsService({
   repository: jobsRepository,
   randomId: randomUUID,
 });
+
+const outboundRepository = {
+  async getPolicy(agentId) {
+    const rows = await sql`
+      SELECT policy.agent_id, policy.enabled, agent.mode,
+             policy.timezone, policy.quiet_start_minute,
+             policy.quiet_end_minute, policy.daily_budget,
+             policy.cooldown_seconds, policy.duplicate_window_seconds,
+             policy.freshness_seconds, policy.updated_at
+      FROM outbound_policies AS policy
+      JOIN agents AS agent ON agent.id = policy.agent_id
+      WHERE policy.agent_id = ${agentId}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  },
+  listDecisions(agentId) {
+    return sql`
+      SELECT decision.id, decision.outcome, decision.reason_code,
+             decision.draft, decision.evidence_references,
+             decision.policy_snapshot, decision.next_evaluation_at,
+             decision.evaluation_count, decision.feedback_label,
+             decision.feedback_note, decision.feedback_at,
+             decision.created_at, decision.updated_at,
+             proposal.id AS proposal_id, proposal.status AS proposal_status,
+             thought.id AS thought_run_id, thought.trigger_type,
+             thought.trigger_reason, conversation.id AS conversation_id,
+             conversation.title AS conversation_title,
+             conversation.external_id AS external_conversation_id,
+             delivery.id AS delivery_id, delivery.status AS delivery_status,
+             delivery.external_message_id, delivery.last_error_code,
+             delivery.last_error_message, delivery.sent_at
+      FROM speech_decisions AS decision
+      JOIN action_proposals AS proposal ON proposal.id = decision.proposal_id
+      JOIN thought_runs AS thought ON thought.id = decision.thought_run_id
+      JOIN conversations AS conversation ON conversation.id = decision.conversation_id
+      LEFT JOIN outbound_deliveries AS delivery
+        ON delivery.speech_decision_id = decision.id
+      WHERE decision.agent_id = ${agentId}
+      ORDER BY decision.created_at DESC
+      LIMIT 100
+    `;
+  },
+  savePolicy(agentId, input) {
+    return sql.begin(async (tx) => {
+      await tx`
+        UPDATE agents SET mode = ${input.mode}, updated_at = now()
+        WHERE id = ${agentId}
+      `;
+      const rows = await tx`
+        INSERT INTO outbound_policies (
+          agent_id, enabled, timezone, quiet_start_minute, quiet_end_minute,
+          daily_budget, cooldown_seconds, duplicate_window_seconds,
+          freshness_seconds, created_at, updated_at
+        ) VALUES (
+          ${agentId}, ${input.enabled}, ${input.timezone},
+          ${input.quietStartMinute}, ${input.quietEndMinute},
+          ${input.dailyBudget}, ${input.cooldownSeconds},
+          ${input.duplicateWindowSeconds}, ${input.freshnessSeconds}, now(), now()
+        )
+        ON CONFLICT (agent_id) DO UPDATE SET
+          enabled = EXCLUDED.enabled, timezone = EXCLUDED.timezone,
+          quiet_start_minute = EXCLUDED.quiet_start_minute,
+          quiet_end_minute = EXCLUDED.quiet_end_minute,
+          daily_budget = EXCLUDED.daily_budget,
+          cooldown_seconds = EXCLUDED.cooldown_seconds,
+          duplicate_window_seconds = EXCLUDED.duplicate_window_seconds,
+          freshness_seconds = EXCLUDED.freshness_seconds,
+          updated_at = EXCLUDED.updated_at
+        RETURNING agent_id, enabled, ${input.mode}::text AS mode, timezone,
+                  quiet_start_minute, quiet_end_minute, daily_budget,
+                  cooldown_seconds, duplicate_window_seconds,
+                  freshness_seconds, updated_at
+      `;
+      const cancelled = await tx`
+        UPDATE outbound_deliveries AS delivery
+        SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
+            last_error_code = 'policy_changed',
+            last_error_message = '发送前策略已更新；旧 delivery 已取消',
+            updated_at = now()
+        FROM speech_decisions AS decision
+        WHERE decision.id = delivery.speech_decision_id
+          AND decision.agent_id = ${agentId}
+          AND delivery.status IN ('queued', 'retry_wait')
+        RETURNING delivery.id, delivery.message_id, delivery.conversation_id,
+                  delivery.speech_decision_id
+      `;
+      for (const delivery of cancelled) {
+        const messages = await tx`
+          UPDATE messages
+          SET external_receipt = ${tx.json({
+            status: "cancelled",
+            outboundDeliveryId: delivery.id,
+            reason: "policy_changed",
+          })}
+          WHERE id = ${delivery.message_id}
+          RETURNING correlation_id
+        `;
+        await tx`
+          UPDATE action_proposals AS proposal
+          SET status = 'cancelled', policy_reasons = ${tx.json(["policy_changed"])},
+              updated_at = now()
+          FROM speech_decisions AS decision
+          WHERE decision.id = ${delivery.speech_decision_id}
+            AND proposal.id = decision.proposal_id
+        `;
+        await tx`
+          INSERT INTO events (
+            id, conversation_id, event_type, source_type, payload_json,
+            correlation_id, created_at
+          ) VALUES (
+            ${`event:outbound-policy-cancel:${delivery.id}`},
+            ${delivery.conversation_id}, 'outbound_message_cancelled', 'policy',
+            ${tx.json({ deliveryId: delivery.id, reasonCode: "policy_changed" })},
+            ${messages[0]?.correlation_id ?? delivery.id}, now()
+          ) ON CONFLICT (id) DO NOTHING
+        `;
+      }
+      return rows[0];
+    });
+  },
+  async saveFeedback(agentId, decisionId, input) {
+    const rows = await sql`
+      UPDATE speech_decisions
+      SET feedback_label = ${input.label}, feedback_note = ${input.note},
+          feedback_at = now(), updated_at = now()
+      WHERE id = ${decisionId} AND agent_id = ${agentId}
+      RETURNING id, feedback_label, feedback_note, feedback_at
+    `;
+    return rows[0] ?? null;
+  },
+};
+
+const outboundService = createOutboundService({ repository: outboundRepository });
 
 class RequestError extends Error {
   constructor(code, message, status = 400) {
@@ -511,6 +649,36 @@ const server = http.createServer(async (request, response) => {
       sendJson(response, 200, { jobs: await jobsService.listJobs() }, origin);
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/outbound") {
+      sendJson(response, 200, await outboundService.snapshot(), origin);
+      return;
+    }
+    if (request.method === "PUT" && url.pathname === "/api/outbound/policy") {
+      sendJson(
+        response,
+        200,
+        { policy: await outboundService.savePolicy(await readJson(request)) },
+        origin,
+      );
+      return;
+    }
+    const speechFeedbackRoute = url.pathname.match(
+      /^\/api\/outbound\/decisions\/([^/]+)\/feedback$/,
+    );
+    if (speechFeedbackRoute && request.method === "POST") {
+      sendJson(
+        response,
+        200,
+        {
+          feedback: await outboundService.saveFeedback(
+            decodeURIComponent(speechFeedbackRoute[1]),
+            await readJson(request),
+          ),
+        },
+        origin,
+      );
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/thought-runs") {
       sendJson(response, 200, { thoughtRuns: await listThoughtRuns() }, origin);
       return;
@@ -606,7 +774,8 @@ const server = http.createServer(async (request, response) => {
   } catch (error) {
     const expected = error instanceof LlmConfigurationError ||
       error instanceof RequestError ||
-      error instanceof JobRequestError;
+      error instanceof JobRequestError ||
+      error instanceof OutboundRequestError;
     console.error("control API request failed", {
       code: expected ? error.code : "internal_error",
       message: expected ? error.message : "unexpected request failure",

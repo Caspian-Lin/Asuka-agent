@@ -83,6 +83,31 @@ export const actionProposalStatus = pgEnum("action_proposal_status", [
   "cancelled",
 ]);
 
+export const speechDecisionOutcome = pgEnum("speech_decision_outcome", [
+  "silent",
+  "defer",
+  "blocked",
+  "shadow_speak",
+  "speak",
+]);
+
+export const speechFeedbackLabel = pgEnum("speech_feedback_label", [
+  "send",
+  "defer",
+  "silent",
+]);
+
+export const outboundDeliveryStatus = pgEnum("outbound_delivery_status", [
+  "queued",
+  "sending",
+  "awaiting_response",
+  "sent",
+  "retry_wait",
+  "failed",
+  "failed_uncertain",
+  "cancelled",
+]);
+
 export const llmProfileSettings = pgTable(
   "llm_profile_settings",
   {
@@ -638,6 +663,114 @@ export const actionProposals = pgTable(
     ),
     index("action_proposals_status_idx").on(table.status, table.createdAt),
     index("action_proposals_compiler_call_idx").on(table.compilerLlmCallId),
+  ],
+);
+
+/** Owner-controlled hard policy; model output cannot modify this row. */
+export const outboundPolicies = pgTable("outbound_policies", {
+  agentId: text("agent_id")
+    .primaryKey()
+    .references(() => agents.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  timezone: text("timezone").notNull().default("Asia/Shanghai"),
+  quietStartMinute: integer("quiet_start_minute").notNull().default(0),
+  quietEndMinute: integer("quiet_end_minute").notNull().default(0),
+  dailyBudget: integer("daily_budget").notNull().default(10),
+  cooldownSeconds: integer("cooldown_seconds").notNull().default(300),
+  duplicateWindowSeconds: integer("duplicate_window_seconds").notNull().default(86_400),
+  freshnessSeconds: integer("freshness_seconds").notNull().default(1_800),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+});
+
+/** Auditable semantic decision plus deterministic hard-policy result. */
+export const speechDecisions = pgTable(
+  "speech_decisions",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id),
+    thoughtRunId: text("thought_run_id")
+      .notNull()
+      .references(() => thoughtRuns.id, { onDelete: "cascade" }),
+    proposalId: text("proposal_id")
+      .notNull()
+      .references(() => actionProposals.id, { onDelete: "cascade" }),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    outcome: speechDecisionOutcome("outcome").notNull(),
+    reasonCode: text("reason_code").notNull(),
+    draft: text("draft").notNull(),
+    contentHash: text("content_hash").notNull(),
+    evidenceReferences: jsonb("evidence_references").notNull().default([]),
+    policySnapshot: jsonb("policy_snapshot").notNull().default({}),
+    nextEvaluationAt: timestamp("next_evaluation_at", { withTimezone: true }),
+    evaluationCount: integer("evaluation_count").notNull().default(1),
+    feedbackLabel: speechFeedbackLabel("feedback_label"),
+    feedbackNote: text("feedback_note"),
+    feedbackAt: timestamp("feedback_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("speech_decisions_proposal_uidx").on(table.proposalId),
+    uniqueIndex("speech_decisions_thought_proposal_uidx").on(
+      table.thoughtRunId,
+      table.proposalId,
+    ),
+    index("speech_decisions_conversation_time_idx").on(
+      table.conversationId,
+      table.createdAt,
+    ),
+    index("speech_decisions_deferred_idx").on(table.outcome, table.nextEvaluationAt),
+    index("speech_decisions_content_idx").on(table.conversationId, table.contentHash),
+  ],
+);
+
+/** The only queue allowed to call NapCat send actions. */
+export const outboundDeliveries = pgTable(
+  "outbound_deliveries",
+  {
+    id: text("id").primaryKey(),
+    speechDecisionId: text("speech_decision_id")
+      .notNull()
+      .references(() => speechDecisions.id, { onDelete: "cascade" }),
+    channelId: text("channel_id")
+      .notNull()
+      .references(() => channels.id, { onDelete: "cascade" }),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    messageId: text("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    externalConversationId: text("external_conversation_id").notNull(),
+    echo: text("echo").notNull(),
+    status: outboundDeliveryStatus("status").notNull().default("queued"),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    externalMessageId: text("external_message_id"),
+    responseJson: jsonb("response_json"),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("outbound_deliveries_decision_uidx").on(table.speechDecisionId),
+    uniqueIndex("outbound_deliveries_echo_uidx").on(table.echo),
+    index("outbound_deliveries_claim_idx").on(
+      table.status,
+      table.availableAt,
+      table.leaseExpiresAt,
+    ),
+    index("outbound_deliveries_channel_idx").on(table.channelId, table.createdAt),
   ],
 );
 

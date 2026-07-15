@@ -64,6 +64,13 @@
       "when": 1784135216316,
       "tag": "0008_lethal_radioactive_man",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1784135936248,
+      "tag": "0009_famous_legion",
+      "breakpoints": true
     }
   ]
 }

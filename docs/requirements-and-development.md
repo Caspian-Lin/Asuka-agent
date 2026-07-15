@@ -4,7 +4,7 @@
 >
 > 更新时间：2026-07-15
 >
-> 状态：NapCat QQ 入站、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、primary 自然思绪/只读工具循环和 fast 动作编译已实现；正式记忆召回与受策略控制的自主外发继续按依赖链实现
+> 状态：NapCat QQ 双向接入、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、primary 自然思绪/只读工具循环、fast 动作编译和受硬策略控制的自主外发已实现；正式记忆召回继续按依赖链实现
 >
 > 配套实现：`Asuka Agent`
 
@@ -139,7 +139,7 @@ flowchart TD
 1. **事件先于记忆**：原始事实来源不可丢；
 2. **候选先于生效**：抽取结果默认不是事实；
 3. **检索必须可拒绝**：没有相关证据时返回空；
-4. **自主先在 Shadow 中学习**：未验证策略不外发；
+4. **自主默认在 Shadow 中学习**：只有操作员显式启用并通过硬策略的白名单会话才外发；
 5. **权限是代码路径，不是 prompt 文案**；
 6. **所有副作用均可追溯**：消息、工具、调度、记忆更新共享 correlation id；
 7. **用户可见、可改、可删除**。
@@ -149,9 +149,9 @@ flowchart TD
 | 阶段 | 目标 | 主要交付 | 开放权限 |
 |---|---|---|---|
 | Phase 1（已完成） | 建立可靠消息事实源 | NapCat QQ、PostgreSQL 接收箱、会话投影、IM 页面、双档 LLM 设置 | 无外部工具、无主动外发 |
-| Phase 2（当前） | 跑通可追踪认知 MVP | 定时任务、Thought Run、多轮调用模型、上下文/来源审计、记忆候选 | 仍不外发；候选不自动激活 |
+| Phase 2（当前） | 跑通可追踪认知 MVP | 定时任务、Thought Run、多轮调用模型、上下文/来源审计、记忆候选、Shadow 与受限 QQ 外发 | 外发默认关闭；候选不自动激活 |
 | Phase 2.5 | 正式记忆与召回 | 审核状态机、原子记忆、BM25/vector、时间过滤、召回工具 | 只读召回 |
-| Phase 3 | 小分类器与受限主动发言 | 发送策略模型、校准阈值、A/B、预算、撤回、用户反馈 | 低风险、小预算外发 |
+| Phase 3 | 分类器与主动发言扩展 | 可选发送策略模型、校准阈值、A/B、撤回、更多 Channel | 按评测扩大低风险额度 |
 | Phase 4 | 工具市场、子 Agent、长期学习 | 签名工具包、能力令牌、沙箱、子 Agent、procedural memory | 按域逐项授权 |
 
 ## 6. 第一阶段需求
@@ -584,20 +584,20 @@ contradiction_penalty
 
 ## 11. 主动发言策略与小分类器
 
-### 11.1 是否可以训练小分类器
+### 11.1 当前方案：LLM 语义决策 + 硬策略门
 
-可以，而且比每次用大模型判断“该不该说”更便宜、更稳定。但不应在第一阶段立刻训练，因为没有真实标签。
+当前没有足够真实标签，因此第一版不训练小分类器。primary 在自然思绪中给出互动意图和回复草稿，fast 只把它编译成 `reply | no_action` proposal；随后完全由服务端确定性策略决定 `silent | defer | blocked | shadow_speak | speak`。模型和未来分类器都不拥有发送权限。
 
-推荐三层决策：
+当前决策链：
 
 ```mermaid
 flowchart TD
-    G["硬策略门<br/>权限·静默时段·预算·敏感度"] --> C["小分类器<br/>send / defer / silent"]
-    C --> R["内容风险复核<br/>事实依据·重复·副作用"]
-    R --> O["发送 / 排队 / 阻止"]
+    P["primary 自然思绪<br/>互动意图与原文草稿"] --> F["fast 编译<br/>reply / no_action"]
+    F --> G["硬策略门<br/>白名单·总开关·静默·预算·冷却·去重·时效"]
+    G --> O["沉默 / 延后 / Shadow / 唯一出站队列"]
 ```
 
-分类器不拥有发送权限，只提供一个经过校准的建议。
+小分类器仍是可选的未来优化：当人工反馈足够时，可插在 fast proposal 与硬策略门之间提供校准建议，但不能绕过硬策略。当前页面的“应该发送 / 应该延后 / 应该沉默”只记录标签，不改变已产生的外部效果。
 
 ### 11.2 训练数据
 
@@ -685,7 +685,7 @@ last_success_at / next_run_at
 
 群聊知识空间仍然共享，不按用户硬隔离。每条上下文消息必须携带稳定 `sender_id`、当时显示名、reply target、时间和 message ID；记忆结果分开保存 `source_speaker_id` 与 `subject_id`。确定性校验拒绝上下文外证据、未知 subject、未解析对象上的强行绑定，以及 source 没有实际说出证据的候选。
 
-### 12.5 Thought Stream v2 目标运行协议
+### 12.5 Thought Stream v2 当前运行协议
 
 `thought_tick` 已按下列协议完成 primary、fast compiler、有界 revision 与原子提交：
 
@@ -705,6 +705,12 @@ primary 应被稳定 system instruction 定义为 Asuka，而不是“扮演 Asu
 主模型可以积极寻找与群成员互动的价值，但不得把“每轮必须说话”作为目标。fast 编译器的 `no_action` 必须能正常完成 Turn。reply/memory/task 只生成 proposal；实际发送、激活或其他副作用继续由独立策略门和 executor 处理。
 
 记忆不按 Thought Stream 或 conversation 建立物理孤岛。Thought Turn 可以提出带证据的 memory proposal，后台 consolidation 在 Agent 全局范围去重、冲突分析和 supersede；召回时再根据任务相关性与 disclosure policy 投影到当前会话。
+
+### 12.6 自主发言当前协议
+
+fast compiler 接受 `reply/no_action` 后，worker 创建可审计的 speech decision。硬策略依次检查总开关、Channel、QQ 白名单、目标一致性、草稿与证据、时效、重复、静默时段、每日额度、会话冷却和 Agent 模式。默认策略是 `enabled=false` 且 Agent 为 `shadow`。
+
+`shadow_speak` 只保存“本来会说什么”；`speak` 会在同一事务先创建 `author_kind=agent, direction=outbound` 的本地消息和唯一 delivery。NapCat gateway 是唯一 executor，使用稳定 `echo` 调用 `send_group_msg/send_private_msg`。明确成功才写入平台 message ID；发送后响应丢失标为 `failed_uncertain` 且不自动重试，优先避免重复发言。控制台展示关联 thought、草稿、证据、策略原因、delivery 与人工反馈。完整状态和示例见 `docs/autonomous-speech.md`。
 
 ## 13. 工具、权限与子 Agent
 
@@ -791,7 +797,9 @@ interface ChannelAdapter {
 
 ### 14.3 NapCat QQ 当前实现
 
-NapCat 作为 OneBot 11 正向 WebSocket 服务端监听 `127.0.0.1:3001`，Asuka gateway 主动连接。`NAPCAT_GROUP_WHITELIST` 是逗号分隔群号集合，`NAPCAT_PRIVATE_USER_WHITELIST` 是允许私聊的 QQ 号集合；两者都为空表示拒绝所有消息。当前接收白名单 `message.group` 与 `message.private`，拒绝自身和非白名单消息。允许消息先原样写入 PostgreSQL `inbound_deliveries`，随后由持续 worker 投影为会话、消息与事件；WebSocket 回调不直接调用 Agent。Channel 页面显示网关心跳、会话、历史和未读状态。完整配置见 `docs/qq-ingress.md`。
+NapCat 作为 OneBot 11 正向 WebSocket 服务端监听 `127.0.0.1:3001`，Asuka gateway 主动连接。`NAPCAT_GROUP_WHITELIST` 是逗号分隔群号集合，`NAPCAT_PRIVATE_USER_WHITELIST` 是允许私聊的 QQ 号集合；两者都为空表示拒绝所有消息。当前接收白名单 `message.group` 与 `message.private`，拒绝自身和非白名单消息。允许消息先原样写入 PostgreSQL `inbound_deliveries`，随后由持续 worker 投影为会话、消息与事件；WebSocket 回调不直接调用 Agent。Channel 页面显示网关心跳、会话、历史和未读状态。
+
+同一 gateway 也是唯一出站 adapter，只消费已通过服务端硬策略的 `outbound_deliveries`。群聊使用 `send_group_msg`，私聊使用 `send_private_msg`，请求和响应通过稳定 `echo` 关联。完整配置见 `docs/qq-ingress.md`，自主发言状态机见 `docs/autonomous-speech.md`。
 
 ## 15. 安全、隐私与治理
 
@@ -969,24 +977,24 @@ outbound_duplicate_prevented
 | 规则抽取误判 | 候选需人工接受 | LLM extractor + schema validation + precision 评测 |
 | 正式召回尚未实现 | 候选不参与上下文 | 审核后实现 BM25/vector/graph 混合召回 |
 | 记忆越来越多 | status、归档、原子化 | 后台 consolidation proposal + 分层上下文 |
-| 频繁主动打扰 | 全部 Shadow | 高 precision 分类器 + 硬预算 + 用户控制 |
+| 频繁主动打扰 | 默认总开关关闭；Shadow、硬预算、静默、冷却、去重 | 积累反馈后评估高 precision 分类器 |
 | 记忆召回尚未实现 | UI 明确只展示候选 | 审核状态机 + PostgreSQL/pgvector，必要时 Graphiti |
 | 单轮 JSON 思绪过于僵硬 | 保留完整调用审计 | primary 自然认知 + fast 结构化动作编译 |
 | 跨 trigger 无会话短期记忆 | 已有 per-conversation watermark | Thought Stream/epoch + 追加式上下文 + 有界压缩 |
-| 多轮工具循环尚未实现 | Thought Run schema 已支持多轮 | 先开放只读 memory/message/source tools，副作用只生成 proposal |
+| 工具能力有限 | 已开放有界只读 memory/message/source tools | 正式记忆库后完善召回；副作用仍只生成 proposal |
 | Asuka 自身消息不在入站历史 | Gateway 拒绝 self event | outbound 先持久化 `author_kind=agent`，平台回显幂等去重 |
 | 外部内容注入 | Phase 1 无外部抓取 | taint、白名单、最小权限、安全回归 |
 | 评测样本太少 | 明确标记 smoke suite | 引入错误回归集与公开 benchmark |
 
 ## 21. 后续高权限能力进入条件
 
-当前只提前开放低风险、只入站的 IM 与调度控制面。主动外发、工具和自动记忆整理仍需满足以下条件：
+当前已开放白名单 QQ 的低预算主动外发 MVP；默认关闭并运行在 Shadow，模型无直接发送权限。扩大外发额度、开放更多 Channel、写工具和自动记忆整理仍需满足以下条件：
 
 - 记忆抽取人工 precision ≥ 90%；
 - 固定召回/拒答集持续通过；
 - 每个派生记忆都有 evidence；
 - 消息、job、tool call 均支持幂等；
-- 主动思绪至少积累 2,000 条有效人工标签，且包含足够静默负例；
+- 若引入或依赖主动发言分类器，至少积累 2,000 条有效人工标签，且包含足够静默负例；
 - IM 外发具备全局 kill switch、每日预算和安静时段；
 - 外部工具完成 T0–T5 分级、能力令牌和审计；
 - 隐私删除可以清理原文、派生记忆和索引副本；
@@ -1007,3 +1015,5 @@ outbound_duplicate_prevented
 11. 记忆是 Agent 全局知识而非 conversation 孤岛，但所有个人事实必须保留稳定身份、source/subject、message evidence、敏感度和披露策略；
 12. 模型只提出 reply/memory/task proposal，服务端策略门和幂等 executor 拥有副作用权限；
 13. 压缩开启新 epoch 但不删除原始运行；KV/context cache 只是性能优化，不是正确性依赖。
+14. 自主发言第一版由 LLM proposal 加服务端硬策略完成；默认关闭和 Shadow，不以分类器为前置条件；
+15. NapCat gateway 是唯一 QQ 出站 executor，结果不确定的发送不自动重试。
