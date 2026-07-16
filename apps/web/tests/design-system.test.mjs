@@ -15,15 +15,19 @@ const componentFiles = [
 ];
 
 test("web shell uses the shared Chinese font and icon library", async () => {
-  const [layout, packageJson, ...components] = await Promise.all([
+  const [layout, packageJson, favicon, ...components] = await Promise.all([
     readFile(new URL("layout.tsx", appRoot), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../public/favicon.svg", import.meta.url), "utf8"),
     ...componentFiles.map((file) => readFile(new URL(`components/${file}`, appRoot), "utf8")),
   ]);
 
   assert.match(layout, /Noto_Sans_SC/);
   assert.match(layout, /colorThemeBootstrapScript/);
   assert.equal(JSON.parse(packageJson).dependencies["react-icons"], "^5.5.0");
+  assert.match(favicon, /#FEB266/);
+  assert.match(favicon, /#3B9AE1/);
+  assert.doesNotMatch(favicon, /#(?:7165DF|68C4FF)/i);
   for (const source of components) {
     assert.match(source, /react-icons\/lu/);
     assert.doesNotMatch(source, /className="(?:empty-orbit|section-kicker)"/);

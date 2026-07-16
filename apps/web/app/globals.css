@@ -205,8 +205,8 @@ textarea:focus-visible {
 }
 
 :root[data-color-theme="asuka"] ::selection {
-  background: #00ffee;
-  color: #ff7409;
+  background: var(--accent-strong);
+  color: var(--warning);
 }
 
 .agent-shell {
