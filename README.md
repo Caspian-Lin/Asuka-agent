@@ -58,9 +58,12 @@ make backend      # 仅三个后端进程
 make worker       # 手动处理一批入站消息
 make db-generate  # 生成 migration，必须审阅 SQL
 make db-migrate   # 应用已审阅 migration
+make db-reset CONFIRM_DATABASE_RESET=asuka_agent  # 永久删除并重建本地数据库
 make check        # ESLint + typecheck + workspace 边界 + 单元测试
 make test         # 构建 + 完整测试
 ```
+
+`db-reset` 仅用于丢弃本机开发数据。执行前先停止 gateway、control API 和 worker，并确认 `.env` 的 `DATABASE_URL` 指向预期数据库；命令只接受 loopback PostgreSQL，拒绝维护库和模板库，且确认值必须与 URL 中的数据库名完全一致。它会从 `template0` 新建空库并应用当前完整 migration chain，无法恢复原有数据。
 
 ## 主要目录
 

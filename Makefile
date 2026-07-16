@@ -7,7 +7,7 @@ WEB_PORT ?= 3000
 
 .PHONY: help install frontend web backend gateway control-api worker worker-watch dev dev-all \
 	build start lint typecheck boundaries test test-unit check db-generate db-check db-migrate migrate \
-	napcat-url check-env
+	db-reset napcat-url check-env
 
 help: ## 显示可用命令
 	@awk 'BEGIN { FS = ":.*## " } /^[a-zA-Z0-9_.-]+:.*## / { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -73,6 +73,9 @@ db-migrate: check-env ## 将已审阅的 PostgreSQL migration 应用到数据库
 	$(NPM) run db:migrate
 
 migrate: db-migrate ## db-migrate 的简写
+
+db-reset: check-env ## 永久删除本地数据库、重建并应用全部 migration（需 CONFIRM_DATABASE_RESET=库名）
+	CONFIRM_DATABASE_RESET="$(CONFIRM_DATABASE_RESET)" $(NPM) run db:reset
 
 napcat-url: check-env ## 显示 Agent 将连接的 NapCat WS 地址
 	@node --env-file=$(ENV_FILE) -e 'console.log(process.env.NAPCAT_WS_URL || "NAPCAT_WS_URL is not set")'
