@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist_Mono, Noto_Sans_SC } from "next/font/google";
+import { colorThemeBootstrapScript } from "@/app/components/theme-preferences";
 import "./globals.css";
 
 const notoSansSc = Noto_Sans_SC({
@@ -28,7 +29,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: colorThemeBootstrapScript }} />
+      </head>
       <body
         className={`${notoSansSc.variable} ${geistMono.variable} antialiased`}
       >

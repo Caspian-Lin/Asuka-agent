@@ -32,6 +32,20 @@
   --control-shadow: rgba(0, 0, 0, 0.14);
   --neutral-shadow: rgba(17, 17, 17, 0.08);
   --shadow: 0 4px 8px var(--neutral-shadow);
+  --navigation-surface: var(--paper);
+  --navigation-panel: var(--surface-subtle);
+  --navigation-ink: var(--ink);
+  --navigation-muted: var(--muted);
+  --navigation-line: var(--line);
+
+  --preview-classic-navigation: #ffffff;
+  --preview-classic-surface: #feb266;
+  --preview-classic-accent: #3b9ae1;
+  --preview-classic-ink: #111111;
+  --preview-asuka-navigation: #881c2c;
+  --preview-asuka-surface: #e9922f;
+  --preview-asuka-accent: #a8e2ff;
+  --preview-asuka-ink: #24100d;
 
   --font-sans: var(--font-noto-sans-sc);
   --font-mono: var(--font-geist-mono);
@@ -61,6 +75,43 @@
   --space-10: 2.5rem;
   --space-12: 3rem;
   --space-16: 4rem;
+}
+
+:root[data-color-theme="asuka"] {
+  --canvas: #e9922f;
+  --paper: #ffc45f;
+  --paper-strong: #ffd986;
+  --surface-subtle: #f4ac45;
+  --surface-muted: #dc7826;
+  --ink: #24100d;
+  --muted: #52231d;
+  --faint: #58251f;
+  --line: #bd572d;
+  --line-strong: #8e2637;
+  --accent: #a8e2ff;
+  --accent-strong: #085b8e;
+  --accent-soft: #cbeeff;
+  --accent-wash: #e2f5ff;
+  --info: #65c8ff;
+  --info-strong: #075b8b;
+  --info-soft: #c5ebff;
+  --danger: #8b1727;
+  --danger-soft: #ffd3c4;
+  --success: #185e3d;
+  --success-soft: #bfe4c8;
+  --warning: #7a3d00;
+  --warning-soft: #ffd893;
+  --inverse: #fff7ea;
+  --code-surface: #621424;
+  --focus-ring: rgba(168, 226, 255, 0.5);
+  --info-ring: rgba(101, 200, 255, 0.3);
+  --success-ring: rgba(24, 94, 61, 0.2);
+  --neutral-shadow: rgba(74, 16, 13, 0.2);
+  --navigation-surface: #881c2c;
+  --navigation-panel: #ffc45f;
+  --navigation-ink: #fff7ea;
+  --navigation-muted: #ffd6be;
+  --navigation-line: #b94b52;
 }
 
 @theme inline {
@@ -151,8 +202,9 @@ textarea:focus-visible {
   height: 100svh;
   flex-direction: column;
   padding: var(--space-6) var(--space-4) var(--space-6);
-  border-right: 1px solid var(--line);
-  background: var(--paper);
+  border-right: 1px solid var(--navigation-line);
+  background: var(--navigation-surface);
+  color: var(--navigation-ink);
 }
 
 .brand,
@@ -191,7 +243,7 @@ textarea:focus-visible {
 
 .brand small {
   margin-top: 2px;
-  color: var(--muted);
+  color: var(--navigation-muted);
   font-size: var(--type-secondary-body);
   letter-spacing: var(--tracking-normal);
 }
@@ -212,7 +264,7 @@ textarea:focus-visible {
   padding: var(--space-3) var(--space-3);
   border-radius: 13px;
   background: transparent;
-  color: var(--muted);
+  color: var(--navigation-muted);
   font-weight: var(--weight-medium);
   text-align: left;
   transition: 160ms ease;
@@ -254,9 +306,9 @@ textarea:focus-visible {
 .rail-note {
   margin-top: auto;
   padding: var(--space-4);
-  border: 1px solid var(--line);
+  border: 1px solid var(--navigation-line);
   border-radius: 16px;
-  background: var(--surface-subtle);
+  background: var(--navigation-panel);
 }
 
 .rail-note-head {
@@ -1787,6 +1839,7 @@ textarea:focus-visible {
   max-width: 980px;
 }
 
+.theme-settings-section,
 .llm-settings-section,
 .settings-section-head {
   max-width: 980px;
@@ -1794,8 +1847,152 @@ textarea:focus-visible {
   margin-left: auto;
 }
 
+.theme-settings-section,
 .llm-settings-section {
   margin-bottom: 36px;
+}
+
+.theme-option-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.theme-option {
+  display: grid;
+  width: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  grid-template-columns: 96px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 12px;
+  background: var(--paper);
+  color: var(--ink);
+  text-align: left;
+  transition: border-color 180ms ease-out, background 180ms ease-out;
+}
+
+.theme-option:hover {
+  border-color: var(--accent-strong);
+  background: var(--paper-strong);
+}
+
+.theme-option[aria-pressed="true"] {
+  border-color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.theme-preview {
+  position: relative;
+  overflow: hidden;
+  display: block;
+  width: 96px;
+  height: 64px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--theme-preview-surface);
+}
+
+.theme-option[data-theme-preview="classic"] {
+  --theme-preview-navigation: var(--preview-classic-navigation);
+  --theme-preview-surface: var(--preview-classic-surface);
+  --theme-preview-accent: var(--preview-classic-accent);
+  --theme-preview-ink: var(--preview-classic-ink);
+}
+
+.theme-option[data-theme-preview="asuka"] {
+  --theme-preview-navigation: var(--preview-asuka-navigation);
+  --theme-preview-surface: var(--preview-asuka-surface);
+  --theme-preview-accent: var(--preview-asuka-accent);
+  --theme-preview-ink: var(--preview-asuka-ink);
+}
+
+.theme-preview-navigation {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 30%;
+  background: var(--theme-preview-navigation);
+}
+
+.theme-preview-surface {
+  position: absolute;
+  top: 12px;
+  right: 10px;
+  width: 48px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--theme-preview-ink);
+  opacity: 0.8;
+}
+
+.theme-preview-surface::after {
+  position: absolute;
+  top: 14px;
+  right: 0;
+  width: 36px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--theme-preview-ink);
+  content: "";
+  opacity: 0.55;
+}
+
+.theme-preview-accent {
+  position: absolute;
+  right: 10px;
+  bottom: 9px;
+  width: 22px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--theme-preview-accent);
+}
+
+.theme-option-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.theme-option-copy strong {
+  font-size: var(--type-primary-body);
+  font-weight: var(--weight-semibold);
+}
+
+.theme-option-copy small {
+  color: var(--muted);
+  font-size: var(--type-secondary-body);
+  line-height: 1.55;
+}
+
+.theme-option-check {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--accent-strong);
+}
+
+.theme-option[aria-pressed="true"] .theme-option-check {
+  border-color: var(--accent-strong);
+  background: var(--accent);
+  color: var(--ink);
+}
+
+.theme-section-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: var(--space-2) var(--space-2);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: var(--type-secondary-body);
+  font-weight: var(--weight-semibold);
 }
 
 .settings-section-head {
@@ -2340,8 +2537,8 @@ textarea:focus-visible {
 @media (max-width: 700px) {
   .agent-shell { display: block; }
   .side-rail { display: none; }
-  .mobile-nav { position: sticky; top: 0; z-index: 8; overflow-x: auto; display: flex; height: 48px; padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--line); background: var(--paper); scrollbar-width: none; }
-  .mobile-nav button { display: flex; min-width: 67px; flex: 1; align-items: center; justify-content: center; gap: 5px; border-radius: 9px; background: transparent; color: var(--muted); font-size: var(--type-secondary-body); }
+  .mobile-nav { position: sticky; top: 0; z-index: 8; overflow-x: auto; display: flex; height: 48px; padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--navigation-line); background: var(--navigation-surface); scrollbar-width: none; }
+  .mobile-nav button { display: flex; min-width: 67px; flex: 1; align-items: center; justify-content: center; gap: 5px; border-radius: 9px; background: transparent; color: var(--navigation-muted); font-size: var(--type-secondary-body); }
   .mobile-nav button.active { background: var(--accent-soft); color: var(--accent-strong); }
   .chat-grid { height: calc(100svh - 110px); }
   .conversation-heading { padding: var(--space-4) var(--space-4) var(--space-4); }
@@ -2378,6 +2575,7 @@ textarea:focus-visible {
   .settings-section-head,
   .llm-profile-form > header,
   .llm-profile-form > footer { align-items: stretch; flex-direction: column; }
+  .theme-option-list { grid-template-columns: 1fr; }
   .llm-profile-state { justify-content: space-between; }
   .llm-fields { grid-template-columns: 1fr; }
   .llm-fields .wide-field { grid-column: auto; }
