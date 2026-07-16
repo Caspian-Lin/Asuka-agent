@@ -154,6 +154,12 @@ test("projection keeps stable order and exact auditable context items", () => {
     "recalled_memory",
     "new_source",
   ]);
+  const committedMessage = projection.contextItems.find((item) => (
+    item.itemType === "message" && item.metadata.section === "committed_turn"
+  ));
+  assert.equal(committedMessage.metadata.thoughtRunId, "turn-1");
+  assert.equal(committedMessage.metadata.turnOrdinal, 1);
+  assert.match(projection.messages[1].content, /上一上下文段摘要/);
   assert.equal(projection.newMessageStartId, "new-1");
   assert.equal(projection.newMessageEndId, "new-1");
 });

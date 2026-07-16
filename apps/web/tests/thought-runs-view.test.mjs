@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildThoughtContextOutline,
+  callRetryIndex,
   collectContextSections,
   collectPrimarySystemInstructions,
   describeSystemInstruction,
@@ -131,4 +133,48 @@ test("current run calls describe their stage instead of labeling every output as
     status: "failed",
     error_code: "timeout",
   }), "主模型调用失败");
+});
+
+test("audit outline groups original messages under their persisted Thought turn", () => {
+  const outline = buildThoughtContextOutline([{ context_items: [
+    {
+      id: "history-message",
+      itemType: "message",
+      referenceId: "message-1",
+      title: "小林",
+      content: "周六去露营",
+      metadata: { section: "committed_turn", thoughtRunId: "thought-1", turnOrdinal: 1 },
+    },
+    {
+      id: "history-thought",
+      itemType: "thought_turn",
+      referenceId: "thought-1",
+      title: "Thought 1",
+      content: "需要继续确认天气。",
+      metadata: { section: "committed_turn", turnOrdinal: 1 },
+    },
+    {
+      id: "current-message",
+      itemType: "message",
+      referenceId: "message-2",
+      title: "阿遥",
+      content: "我来订营地",
+      metadata: { section: "new_source" },
+    },
+  ] }]);
+
+  assert.equal(outline.previousTurns.length, 1);
+  assert.equal(outline.previousTurns[0].messages[0].content, "周六去露营");
+  assert.equal(outline.previousTurns[0].thought?.content, "需要继续确认天气。");
+  assert.equal(outline.currentMessages[0].content, "我来订营地");
+});
+
+test("identical persisted request hashes expose an actual retry index", () => {
+  const calls = [
+    { id: "call-1", input_hash: "same" },
+    { id: "call-2", input_hash: "other" },
+    { id: "call-3", input_hash: "same" },
+  ];
+  assert.equal(callRetryIndex(calls, calls[0]), 0);
+  assert.equal(callRetryIndex(calls, calls[2]), 1);
 });

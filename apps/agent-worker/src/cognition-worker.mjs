@@ -581,15 +581,18 @@ export function createCognitionWorker({
       sql`
         SELECT thought.id, thought.turn_ordinal, thought.new_message_start_at,
                thought.new_message_start_id, thought.new_message_end_at,
-               thought.new_message_end_id, call.response_json ->> 'content' AS primary_output,
+               thought.new_message_end_id,
+               COALESCE(call.response_json ->> 'content', thought.primary_output) AS primary_output,
                proposal.proposal_state AS action_state
         FROM thought_runs AS thought
         LEFT JOIN LATERAL (
           SELECT response_json
           FROM llm_calls
           WHERE thought_run_id = thought.id
-            AND purpose IN ('primary', 'revision')
+            AND purpose IN ('primary', 'tool_continuation', 'revision')
             AND status = 'succeeded'
+            AND NULLIF(BTRIM(response_json ->> 'content'), '') IS NOT NULL
+            AND jsonb_array_length(COALESCE(response_json -> 'toolCalls', '[]'::jsonb)) = 0
           ORDER BY sequence_number DESC
           LIMIT 1
         ) AS call ON true
@@ -1886,6 +1889,13 @@ export function createCognitionWorker({
             schema: tool.function.parameters,
           },
         })),
+        ...(request.responseSchema ? [{
+          itemType: "response_schema",
+          referenceId: request.promptVersion,
+          title: "Structured output JSON Schema",
+          content: JSON.stringify(request.responseSchema),
+          metadata: { section: "output_contract" },
+        }] : []),
       ];
       for (const [ordinal, item] of contextItems.entries()) {
         await tx`

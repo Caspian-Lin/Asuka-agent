@@ -54,6 +54,24 @@ export type ThoughtSystemInstructionCall = {
   }>;
 };
 
+export type ThoughtContextTurn = {
+  thoughtRunId: string;
+  turnOrdinal: number | null;
+  messages: ThoughtContextItem[];
+  thought: ThoughtContextItem | null;
+};
+
+export type ThoughtContextOutline = {
+  tools: ThoughtContextItem[];
+  compression: ThoughtContextItem[];
+  initializationMessages: ThoughtContextItem[];
+  previousTurns: ThoughtContextTurn[];
+  unassignedHistoryMessages: ThoughtContextItem[];
+  recalledMemories: ThoughtContextItem[];
+  currentMessages: ThoughtContextItem[];
+  other: ThoughtContextItem[];
+};
+
 export function groupThoughtRuns<T extends ThoughtRunListItem>(runs: T[]) {
   const groups = new Map<string, ThoughtRunGroup<T>>();
   for (const run of runs) {
@@ -91,6 +109,25 @@ export function contextSectionFor(item: ThoughtContextItem): ThoughtContextSecti
   return "other";
 }
 
+export function collectUniqueContextItems(
+  calls: Array<{ context_items: ThoughtContextItem[] }>,
+) {
+  const seen = new Set<string>();
+  return calls.flatMap((call) => call.context_items).flatMap((item) => {
+    const sourceSection = String(item.metadata?.section ?? "");
+    if (item.itemType === "tool_result" || sourceSection === "compiler_manifest") return [];
+    const key = [
+      item.itemType,
+      item.referenceId ?? "",
+      sourceSection,
+      item.content ?? "",
+    ].join("\u0000");
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [item];
+  });
+}
+
 const sectionOrder: ThoughtContextSectionKey[] = [
   "available_tools",
   "compression",
@@ -102,30 +139,103 @@ const sectionOrder: ThoughtContextSectionKey[] = [
 ];
 
 export function collectContextSections(calls: Array<{ context_items: ThoughtContextItem[] }>) {
-  const seen = new Set<string>();
   const sections = new Map<ThoughtContextSectionKey, ThoughtContextItem[]>();
-  for (const call of calls) {
-    for (const item of call.context_items) {
-      const sourceSection = String(item.metadata?.section ?? "");
-      if (item.itemType === "tool_result" || sourceSection === "compiler_manifest") continue;
-      const key = [
-        item.itemType,
-        item.referenceId ?? "",
-        sourceSection,
-        item.content ?? "",
-      ].join("\u0000");
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const section = contextSectionFor(item);
-      const values = sections.get(section) ?? [];
-      values.push(item);
-      sections.set(section, values);
-    }
+  for (const item of collectUniqueContextItems(calls)) {
+    const section = contextSectionFor(item);
+    const values = sections.get(section) ?? [];
+    values.push(item);
+    sections.set(section, values);
   }
   return sectionOrder.flatMap((key) => {
     const items = sections.get(key) ?? [];
     return items.length ? [{ key, items }] : [];
   });
+}
+
+export function buildThoughtContextOutline(
+  calls: Array<{ context_items: ThoughtContextItem[] }>,
+): ThoughtContextOutline {
+  const outline: ThoughtContextOutline = {
+    tools: [],
+    compression: [],
+    initializationMessages: [],
+    previousTurns: [],
+    unassignedHistoryMessages: [],
+    recalledMemories: [],
+    currentMessages: [],
+    other: [],
+  };
+  const turns = new Map<string, ThoughtContextTurn>();
+  let pendingHistory: ThoughtContextItem[] = [];
+  const ensureTurn = (runId: string, ordinal: number | null) => {
+    const existing = turns.get(runId);
+    if (existing) {
+      if (existing.turnOrdinal == null && ordinal != null) existing.turnOrdinal = ordinal;
+      return existing;
+    }
+    const turn: ThoughtContextTurn = {
+      thoughtRunId: runId,
+      turnOrdinal: ordinal,
+      messages: [],
+      thought: null,
+    };
+    turns.set(runId, turn);
+    outline.previousTurns.push(turn);
+    return turn;
+  };
+
+  for (const item of collectUniqueContextItems(calls)) {
+    const section = String(item.metadata?.section ?? "");
+    if (item.itemType === "tool_definition" || section === "tools") {
+      outline.tools.push(item);
+    } else if (item.itemType === "compression" || section === "compression") {
+      outline.compression.push(item);
+    } else if (section === "initialization_history") {
+      outline.initializationMessages.push(item);
+    } else if (section === "committed_turn" && item.itemType === "message") {
+      const runId = typeof item.metadata?.thoughtRunId === "string"
+        ? item.metadata.thoughtRunId
+        : null;
+      const ordinal = Number(item.metadata?.turnOrdinal);
+      if (runId) {
+        ensureTurn(runId, Number.isFinite(ordinal) ? ordinal : null).messages.push(item);
+      } else {
+        pendingHistory.push(item);
+      }
+    } else if (section === "committed_turn" && item.itemType === "thought_turn") {
+      const runId = item.referenceId ?? `unknown-turn-${outline.previousTurns.length + 1}`;
+      const ordinal = Number(item.metadata?.turnOrdinal);
+      const turn = ensureTurn(runId, Number.isFinite(ordinal) ? ordinal : null);
+      if (pendingHistory.length) {
+        turn.messages.unshift(...pendingHistory);
+        pendingHistory = [];
+      }
+      turn.thought = item;
+    } else if (item.itemType === "memory" || section === "recalled_memory") {
+      outline.recalledMemories.push(item);
+    } else if (section === "new_source") {
+      outline.currentMessages.push(item);
+    } else {
+      outline.other.push(item);
+    }
+  }
+  outline.unassignedHistoryMessages.push(...pendingHistory);
+  outline.previousTurns.sort((left, right) => (
+    (left.turnOrdinal ?? Number.MAX_SAFE_INTEGER) -
+    (right.turnOrdinal ?? Number.MAX_SAFE_INTEGER)
+  ));
+  return outline;
+}
+
+export function callRetryIndex<T extends { id: string; input_hash?: string | null }>(
+  calls: T[],
+  call: T,
+) {
+  if (!call.input_hash) return 0;
+  const index = calls.findIndex((candidate) => candidate.id === call.id);
+  return calls.slice(0, Math.max(0, index)).filter((candidate) => (
+    candidate.input_hash === call.input_hash
+  )).length;
 }
 
 const toolLabels: Record<string, string> = {
@@ -192,7 +302,7 @@ export function describeSystemInstruction(content: string): {
       description: "把本次 Thought 编译为结构化动作候选，不参与自然思考。",
     };
   }
-  if (/You are Asuka/i.test(content)) {
+  if (/You are Asuka|你是 Asuka/i.test(content)) {
     return {
       kind: "agent_instruction",
       label: "Agent 行为指令",

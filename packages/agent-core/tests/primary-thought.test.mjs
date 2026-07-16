@@ -19,11 +19,13 @@ test("primary prompt fixes Asuka identity and multi-party attribution without JS
   assert.equal(request.profile, "primary");
   assert.equal(request.promptVersion, PRIMARY_THOUGHT_PROMPT_VERSION);
   assert.equal(request.responseSchema, undefined);
-  assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /You are Asuka/);
+  assert.equal(PRIMARY_THOUGHT_PROMPT_VERSION, "asuka-primary-thought-v2-zh");
+  assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /你是 Asuka/);
   assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /sender_id/);
-  assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /stable display name/);
+  assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /稳定显示名称/);
   assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /author_kind=agent/);
-  assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /natural Markdown, not JSON/);
+  assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /简体中文/);
+  assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /不要输出 JSON/);
 });
 
 test("tool surface is stable, sorted, and read-only", () => {

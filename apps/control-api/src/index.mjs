@@ -662,6 +662,8 @@ async function getThoughtRunDetail(thoughtRunId) {
   const runs = await sql`
     SELECT thought.*, conversation.title AS conversation_title,
            conversation.external_id, job.name AS job_name, job.job_type,
+           run.attempt_count AS job_attempt_count,
+           run.max_attempts AS job_max_attempts,
            epoch.ordinal AS context_epoch_ordinal,
            stream.status AS stream_status,
            stream.current_epoch_ordinal,
@@ -680,6 +682,7 @@ async function getThoughtRunDetail(thoughtRunId) {
     sql`
       SELECT call.id, call.sequence_number, call.purpose, call.profile, call.provider,
              call.model, call.prompt_version, call.status, call.error_code,
+             call.input_hash,
              call.latency_ms, call.input_tokens, call.output_tokens,
              call.request_context, call.response_json, call.created_at,
              COALESCE(
@@ -718,12 +721,22 @@ async function getThoughtRunDetail(thoughtRunId) {
       ORDER BY created_at
     `,
     sql`
-      SELECT id, compiler_llm_call_id, ordinal, proposal_type, status,
-             idempotency_key, payload, evidence_references, policy_reasons,
-             created_at, updated_at
-      FROM action_proposals
-      WHERE thought_run_id = ${thoughtRunId}
-      ORDER BY ordinal
+      SELECT proposal.id, proposal.compiler_llm_call_id, proposal.ordinal,
+             proposal.proposal_type, proposal.status, proposal.idempotency_key,
+             proposal.payload, proposal.evidence_references, proposal.policy_reasons,
+             proposal.created_at, proposal.updated_at,
+             decision.id AS decision_id, decision.outcome AS decision_outcome,
+             decision.reason_code AS decision_reason_code,
+             decision.next_evaluation_at, decision.evaluation_count,
+             delivery.id AS delivery_id, delivery.status AS delivery_status,
+             delivery.external_message_id, delivery.last_error_code,
+             delivery.last_error_message, delivery.sent_at
+      FROM action_proposals AS proposal
+      LEFT JOIN speech_decisions AS decision ON decision.proposal_id = proposal.id
+      LEFT JOIN outbound_deliveries AS delivery
+        ON delivery.speech_decision_id = decision.id
+      WHERE proposal.thought_run_id = ${thoughtRunId}
+      ORDER BY proposal.ordinal
     `,
     sql`
       SELECT participant_id, display_name, aliases
@@ -732,7 +745,58 @@ async function getThoughtRunDetail(thoughtRunId) {
       ORDER BY first_seen_at, participant_id
     `,
   ]);
-  return { run: runs[0], calls, outputs, candidates, proposals, participants };
+  const contextRunIds = [...new Set(calls.flatMap((call) => (
+    call.context_items
+      .filter((item) => item.itemType === "thought_turn" && item.referenceId)
+      .map((item) => String(item.referenceId))
+  )))];
+  const [contextRunRows, contextCallRows] = contextRunIds.length
+    ? await Promise.all([
+        sql`
+          SELECT id, turn_ordinal, status, started_at, completed_at
+          FROM thought_runs
+          WHERE id = ANY(${contextRunIds}::text[])
+          ORDER BY turn_ordinal
+        `,
+        sql`
+          SELECT call.id, call.thought_run_id, call.sequence_number, call.purpose,
+                 call.profile, call.provider, call.model, call.status,
+                 call.error_code, call.input_hash, call.latency_ms,
+                 call.input_tokens, call.output_tokens, call.response_json,
+                 call.created_at,
+                 COALESCE(
+                   jsonb_agg(
+                     jsonb_build_object(
+                       'id', item.id,
+                       'itemType', item.item_type,
+                       'referenceId', item.reference_id,
+                       'content', item.content,
+                       'metadata', item.metadata
+                     ) ORDER BY item.ordinal
+                   ) FILTER (WHERE item.item_type = 'tool_result'),
+                   '[]'::jsonb
+                 ) AS tool_results
+          FROM llm_calls AS call
+          LEFT JOIN llm_call_context_items AS item ON item.llm_call_id = call.id
+          WHERE call.thought_run_id = ANY(${contextRunIds}::text[])
+          GROUP BY call.id
+          ORDER BY call.thought_run_id, call.sequence_number
+        `,
+      ])
+    : [[], []];
+  const contextRuns = contextRunRows.map((run) => ({
+    ...run,
+    calls: contextCallRows.filter((call) => call.thought_run_id === run.id),
+  }));
+  return {
+    run: runs[0],
+    calls,
+    outputs,
+    candidates,
+    proposals,
+    participants,
+    contextRuns,
+  };
 }
 
 async function listMemoryCandidates() {

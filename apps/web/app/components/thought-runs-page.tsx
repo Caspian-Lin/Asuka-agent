@@ -1,14 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { IconType } from "react-icons";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  LuArchive,
   LuBrainCircuit,
   LuChevronRight,
   LuCircle,
-  LuFileInput,
-  LuHistory,
   LuListTree,
   LuMessageSquareText,
   LuRefreshCw,
@@ -17,7 +13,8 @@ import {
 } from "react-icons/lu";
 import { controlRequest } from "./control-api";
 import {
-  collectContextSections,
+  buildThoughtContextOutline,
+  callRetryIndex,
   collectPrimarySystemInstructions,
   describeSystemInstruction,
   describeToolArguments,
@@ -27,7 +24,7 @@ import {
   toolDescription,
   toolLabel,
   type ThoughtContextItem,
-  type ThoughtContextSectionKey,
+  type ThoughtContextTurn,
 } from "./thought-runs-view";
 
 type ThoughtRun = {
@@ -85,6 +82,7 @@ type LlmCall = {
   prompt_version: string;
   status: string;
   error_code: string | null;
+  input_hash: string | null;
   latency_ms: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
@@ -92,15 +90,62 @@ type LlmCall = {
   response_json: {
     content?: string;
     toolCalls?: ToolCall[];
+    metadata?: Record<string, unknown>;
   } | null;
   context_items: ThoughtContextItem[];
   created_at: string;
+};
+
+type ContextRunCall = Omit<LlmCall, "request_context" | "context_items" | "prompt_version"> & {
+  thought_run_id: string;
+  tool_results: ThoughtContextItem[];
+};
+
+type ContextRun = {
+  id: string;
+  turn_ordinal: number;
+  status: string;
+  started_at: string;
+  completed_at: string | null;
+  calls: ContextRunCall[];
+};
+
+type ActionProposal = {
+  id: string;
+  compiler_llm_call_id: string | null;
+  ordinal: number;
+  proposal_type: string;
+  status: string;
+  payload: Record<string, unknown>;
+  evidence_references: Array<Record<string, unknown>>;
+  policy_reasons: unknown[];
+  decision_id: string | null;
+  decision_outcome: string | null;
+  decision_reason_code: string | null;
+  next_evaluation_at: string | null;
+  evaluation_count: number | null;
+  delivery_id: string | null;
+  delivery_status: string | null;
+  external_message_id: string | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  sent_at: string | null;
 };
 
 type ThoughtDetail = {
   run: ThoughtRun & {
     external_id: string | null;
     job_name: string;
+    job_attempt_count: number;
+    job_max_attempts: number;
+    primary_output: string | null;
+    compiler_status: string | null;
+    compiler_state: {
+      invalidCallIds?: string[];
+      lastValidationError?: { code?: string; message?: string };
+    };
+    compiler_attempt_count: number;
+    revision_count: number;
   };
   calls: LlmCall[];
   outputs: Array<{
@@ -118,11 +163,13 @@ type ThoughtDetail = {
     status: string;
     attribution_status: string;
   }>;
+  proposals: ActionProposal[];
   participants: Array<{
     participant_id: string;
     display_name: string;
     aliases: string[];
   }>;
+  contextRuns: ContextRun[];
 };
 
 type ToolResultRecord = {
@@ -136,49 +183,7 @@ type ToolResultRecord = {
     sent_at?: string;
   }>;
   memories?: Array<{ title?: string; content?: string }>;
-  error?: { message?: string };
-};
-
-const contextSectionCopy: Record<ThoughtContextSectionKey, {
-  title: string;
-  description: string;
-  icon: IconType;
-}> = {
-  available_tools: {
-    title: "可用只读工具",
-    description: "提供给主 Agent 的能力清单；可用不代表本次运行实际调用过。",
-    icon: LuWrench,
-  },
-  compression: {
-    title: "上一段上下文摘要",
-    description: "只在自动压缩后进入新上下文；手动重置不会携带这份摘要。",
-    icon: LuArchive,
-  },
-  history_messages: {
-    title: "前几轮消息",
-    description: "本会话此前已提交的消息，以及首次建立思绪流时选取的少量历史。",
-    icon: LuHistory,
-  },
-  history_thoughts: {
-    title: "前几轮思绪",
-    description: "同一会话、同一上下文段中已经完成的自然思绪。",
-    icon: LuBrainCircuit,
-  },
-  recalled_memory: {
-    title: "召回记忆",
-    description: "经过权限与证据过滤后，本轮主动召回的长期信息。",
-    icon: LuFileInput,
-  },
-  unread_messages: {
-    title: "本次未读消息",
-    description: "这条 Thought 新消费的消息；成功提交后会同步为已读。",
-    icon: LuMessageSquareText,
-  },
-  other: {
-    title: "其他输入来源",
-    description: "无法归入常规会话来源的审计输入。",
-    icon: LuFileInput,
-  },
+  error?: { code?: string; message?: string };
 };
 
 function formatDateTime(value?: string | null) {
@@ -278,19 +283,437 @@ function ToolResultView({ item }: { item: ThoughtContextItem }) {
   return <p className="tool-result-copy">{result.notice || "工具已返回，未找到可展示的匹配内容。"}</p>;
 }
 
-function NaturalOutput({ call }: { call: LlmCall }) {
-  const content = call.response_json?.content?.trim();
-  const natural = ["primary", "tool_continuation", "revision"].includes(call.purpose);
-  if (natural && content) {
-    return <div className="natural-thought-output"><span>本次调用生成内容</span><p>{content}</p></div>;
+function AuditBadge({
+  tone,
+  children,
+}: {
+  tone: "persisted" | "execution" | "current" | "failure" | "fixed";
+  children: ReactNode;
+}) {
+  return <span className={`audit-badge ${tone}`}>{children}</span>;
+}
+
+function CallStats({ call }: { call: Pick<
+  LlmCall,
+  "created_at" | "model" | "provider" | "input_tokens" | "output_tokens" | "latency_ms"
+> }) {
+  return (
+    <div className="audit-call-stats" aria-label="模型调用统计">
+      <span>{formatDateTime(call.created_at)}</span>
+      <span>{call.model ?? call.provider}</span>
+      <span>{call.input_tokens ?? 0} 输入 / {call.output_tokens ?? 0} 输出 tokens</span>
+      <span>{call.latency_ms ?? 0} ms</span>
+    </div>
+  );
+}
+
+function OriginalMessageList({ items }: { items: ThoughtContextItem[] }) {
+  if (!items.length) return <p className="audit-empty">没有消息。</p>;
+  return (
+    <div className="audit-original-list">
+      {items.map((item) => (
+        <article key={item.id}>
+          <header>
+            <strong>{contextItemTitle(item)}</strong>
+            <AuditBadge tone="fixed">原文</AuditBadge>
+          </header>
+          <p>{item.content || "（空消息）"}</p>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function RawCallPayload({ call }: { call: LlmCall }) {
+  return (
+    <details className="audit-subnode audit-payload">
+      <summary>
+        <span>完整调用载荷</span>
+        <AuditBadge tone="execution">仅执行记录</AuditBadge>
+      </summary>
+      <div className="audit-subnode-body">
+        {call.request_context.map((message, index) => (
+          <article className="audit-payload-message" key={`${call.id}-payload-${index}`}>
+            <strong>{roleLabel(message)}</strong>
+            {message.content && <pre>{message.content}</pre>}
+            {message.tool_calls?.map((toolCall) => (
+              <div className="audit-command" key={toolCall.id}>
+                <span>{toolLabel(toolCall.function.name)}</span>
+                <pre>{toolCall.function.arguments}</pre>
+              </div>
+            ))}
+            {!message.content && !message.tool_calls?.length && <pre>（空内容）</pre>}
+          </article>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function toolFailureKind(item?: ThoughtContextItem) {
+  if (item?.metadata?.ok !== false) return null;
+  const result = parseToolResult(item.content);
+  const code = String(result?.error?.code ?? "");
+  return ["invalid_tool_call", "invalid_tool_arguments", "tool_not_allowed"].includes(code)
+    ? "主观失败"
+    : "客观失败";
+}
+
+function ToolInvocation({
+  toolCall,
+  result,
+}: {
+  toolCall: ToolCall;
+  result?: ThoughtContextItem;
+}) {
+  const failure = toolFailureKind(result);
+  return (
+    <details className={`audit-subnode audit-tool${failure ? " failed" : ""}`} open>
+      <summary>
+        <span>{toolLabel(toolCall.function.name)}</span>
+        <span className="audit-summary-badges">
+          <AuditBadge tone="execution">仅本次续轮</AuditBadge>
+          {failure && <AuditBadge tone="failure">{failure}</AuditBadge>}
+        </span>
+      </summary>
+      <div className="audit-subnode-body">
+        <div className="audit-command">
+          <strong>调用命令</strong>
+          <span>{describeToolArguments(toolCall.function.name, toolCall.function.arguments)}</span>
+          <pre>{toolCall.function.arguments}</pre>
+        </div>
+        <div className="audit-tool-result">
+          <strong>工具返回内容</strong>
+          {result ? <ToolResultView item={result} /> : <p>未记录工具返回。</p>}
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function PrimaryCallNode({
+  call,
+  calls,
+  ordinal,
+}: {
+  call: LlmCall;
+  calls: LlmCall[];
+  ordinal: number;
+}) {
+  const toolCalls = call.response_json?.toolCalls ?? [];
+  const toolResults = call.context_items.filter((item) => item.itemType === "tool_result");
+  const retryIndex = callRetryIndex(calls, call);
+  const failed = call.status === "failed" || Boolean(call.error_code);
+  return (
+    <details className={`audit-node audit-call${failed ? " failed" : ""}`} open>
+      <summary>
+        <span className="audit-node-title">
+          <span className="round-number">{ordinal}</span>
+          <strong>
+            {retryIndex > 0 && `【重试 ${retryIndex}】`}
+            第 {ordinal} 轮调用 · {thoughtCallStageLabel(call)}
+          </strong>
+        </span>
+        <span className="audit-summary-badges">
+          {toolCalls.length > 0 && <AuditBadge tone="current">工具</AuditBadge>}
+          {failed && <AuditBadge tone="failure">客观失败</AuditBadge>}
+          <AuditBadge tone="execution">仅执行记录</AuditBadge>
+        </span>
+      </summary>
+      <div className="audit-node-body">
+        <CallStats call={call} />
+        {failed && (
+          <p className="audit-error-copy">
+            调用未产生可提交结果：{call.error_code ?? "unknown_error"}。
+            相同请求哈希再次出现时会显示为重试。
+          </p>
+        )}
+        {toolCalls.map((toolCall) => (
+          <ToolInvocation
+            key={toolCall.id}
+            toolCall={toolCall}
+            result={toolResults.find((item) => item.referenceId === toolCall.id)}
+          />
+        ))}
+        {call.response_json?.content?.trim() && (
+          <section className="audit-model-output">
+            <header>
+              <strong>模型本次输出</strong>
+              <AuditBadge tone="execution">调用结果</AuditBadge>
+            </header>
+            <p>{call.response_json.content}</p>
+          </section>
+        )}
+        <RawCallPayload call={call} />
+      </div>
+    </details>
+  );
+}
+
+function HistoricalExecution({
+  run,
+  onOpen,
+}: {
+  run?: ContextRun;
+  onOpen: () => void;
+}) {
+  if (!run) {
+    return (
+      <div className="audit-history-link">
+        <p>这条历史 Thought 没有附带旧版执行摘要。</p>
+        <button onClick={onOpen}>查看原 Thought</button>
+      </div>
+    );
   }
-  if (call.error_code) {
-    return <p className="tool-result-error">调用失败：{call.error_code}</p>;
+  return (
+    <details className="audit-subnode audit-history-execution">
+      <summary>
+        <span>当时的执行记录</span>
+        <AuditBadge tone="execution">不进入后续上下文</AuditBadge>
+      </summary>
+      <div className="audit-subnode-body">
+        {run.calls.map((call) => {
+          const tools = call.response_json?.toolCalls ?? [];
+          return (
+            <article className="audit-history-call" key={call.id}>
+              <header>
+                <strong>{thoughtCallStageLabel(call)}</strong>
+                {call.status === "failed" && <AuditBadge tone="failure">失败</AuditBadge>}
+              </header>
+              <CallStats call={call} />
+              {tools.map((toolCall) => {
+                const result = call.tool_results.find((item) => item.referenceId === toolCall.id);
+                return (
+                  <div className="audit-history-tool" key={toolCall.id}>
+                    <strong>{toolLabel(toolCall.function.name)}</strong>
+                    <span>{describeToolArguments(toolCall.function.name, toolCall.function.arguments)}</span>
+                    {result && <ToolResultView item={result} />}
+                  </div>
+                );
+              })}
+            </article>
+          );
+        })}
+        <button className="audit-open-thought" onClick={onOpen}>查看原 Thought 完整载荷</button>
+      </div>
+    </details>
+  );
+}
+
+function actionLabel(value: string) {
+  if (value === "reply") return "回复候选";
+  if (value === "memory") return "记忆候选";
+  if (value === "task") return "任务候选";
+  if (value === "no_action") return "不执行动作";
+  return value;
+}
+
+function parseJsonObject(value?: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
   }
-  if (call.response_json?.toolCalls?.length) {
-    return <p className="round-transition-note">模型先请求补充资料，本轮未形成最终思绪文本。</p>;
+}
+
+function ToolDefinitionList({ items }: { items: ThoughtContextItem[] }) {
+  if (!items.length) return <p className="audit-empty">本次没有向模型提供工具。</p>;
+  return (
+    <div className="audit-tool-definitions">
+      {items.map((item, index) => (
+        <details className="audit-subnode" key={item.id}>
+          <summary>
+            <span>工具 {index + 1} · {toolLabel(item.referenceId ?? item.title)}</span>
+            <AuditBadge tone="fixed">固定配置</AuditBadge>
+          </summary>
+          <div className="audit-subnode-body">
+            <p>{toolDescription(item.referenceId ?? "", item.content)}</p>
+            {item.metadata?.schema !== undefined && (
+              <details className="audit-subnode audit-payload">
+                <summary>参数约束</summary>
+                <pre>{JSON.stringify(item.metadata.schema, null, 2)}</pre>
+              </details>
+            )}
+          </div>
+        </details>
+      ))}
+    </div>
+  );
+}
+
+function PersistedTurnNode({
+  turn,
+  run,
+  onOpen,
+}: {
+  turn: ThoughtContextTurn;
+  run?: ContextRun;
+  onOpen: () => void;
+}) {
+  return (
+    <details className="audit-node audit-previous-turn">
+      <summary>
+        <span className="audit-node-title">
+          <strong>
+            第 {turn.turnOrdinal ?? "?"} 次 Thought
+          </strong>
+        </span>
+        <span className="audit-summary-badges">
+          <AuditBadge tone="fixed">前序</AuditBadge>
+          <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
+        </span>
+      </summary>
+      <div className="audit-node-body">
+        <details className="audit-subnode" open>
+          <summary>
+            <span>读取的原始消息</span>
+            <AuditBadge tone="persisted">{turn.messages.length} 条</AuditBadge>
+          </summary>
+          <div className="audit-subnode-body"><OriginalMessageList items={turn.messages} /></div>
+        </details>
+        {turn.thought && (
+          <details className="audit-subnode audit-persisted-output" open>
+            <summary>
+              <span>最终思绪原文</span>
+              <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
+            </summary>
+            <div className="audit-subnode-body"><p>{turn.thought.content}</p></div>
+          </details>
+        )}
+        <HistoricalExecution run={run} onOpen={onOpen} />
+      </div>
+    </details>
+  );
+}
+
+function proposalResultCopy(proposal: ActionProposal) {
+  if (proposal.delivery_status === "sent") {
+    return `已发送${proposal.external_message_id ? ` · 平台消息 ${proposal.external_message_id}` : ""}`;
   }
-  return <p className="round-transition-note">本轮没有可展示的自然语言输出。</p>;
+  if (proposal.delivery_status) {
+    return `发送状态：${proposal.delivery_status}${proposal.last_error_code ? ` · ${proposal.last_error_code}` : ""}`;
+  }
+  if (proposal.decision_outcome) {
+    return `策略结果：${proposal.decision_outcome} · ${proposal.decision_reason_code ?? "无原因码"}`;
+  }
+  return `Proposal 状态：${proposal.status}`;
+}
+
+function CompilerCallNode({
+  call,
+  ordinal,
+  proposals,
+  finalPrimaryOutput,
+  invalid,
+}: {
+  call: LlmCall;
+  ordinal: number;
+  proposals: ActionProposal[];
+  finalPrimaryOutput: string | null;
+  invalid: boolean;
+}) {
+  const instructions = call.request_context.filter((message) => message.role === "system");
+  const schemaItem = call.context_items.find((item) => item.itemType === "response_schema");
+  const parsed = parseJsonObject(call.response_json?.content);
+  const parsedStatus = typeof parsed?.status === "string" ? parsed.status : null;
+  const revisionReasons = Array.isArray(parsed?.revisionReasons)
+    ? parsed.revisionReasons.map(String)
+    : [];
+  return (
+    <details className={`audit-node audit-compiler-call${invalid ? " failed" : ""}`} open>
+      <summary>
+        <span className="audit-node-title">
+          <span className="round-number">{ordinal}</span>
+          <strong>fast 第 {ordinal} 次 · {thoughtCallStageLabel(call)}</strong>
+        </span>
+        <span className="audit-summary-badges">
+          {invalid && <AuditBadge tone="failure">解析失败</AuditBadge>}
+          <AuditBadge tone="execution">不进入主模型上下文</AuditBadge>
+        </span>
+      </summary>
+      <div className="audit-node-body">
+        <CallStats call={call} />
+        <details className="audit-subnode">
+          <summary>系统提示词</summary>
+          <div className="audit-subnode-body">
+            {instructions.map((message, index) => {
+              const descriptor = describeSystemInstruction(message.content ?? "");
+              return (
+                <details className="audit-subnode" key={`${call.id}-instruction-${index}`}>
+                  <summary>{descriptor.label}</summary>
+                  <pre>{message.content}</pre>
+                </details>
+              );
+            })}
+          </div>
+        </details>
+        <details className="audit-subnode">
+          <summary>
+            <span>输出 JSON 约束</span>
+            <AuditBadge tone="execution">仅 fast 模型</AuditBadge>
+          </summary>
+          <div className="audit-subnode-body">
+            {schemaItem?.content ? (
+              <pre>{JSON.stringify(parseJsonObject(schemaItem.content) ?? schemaItem.content, null, 2)}</pre>
+            ) : (
+              <p className="audit-empty">旧调用未单独保存 response schema；完整请求中的格式约束仍按实际载荷展示。</p>
+            )}
+          </div>
+        </details>
+        <details className="audit-subnode">
+          <summary>工具调用列表</summary>
+          <div className="audit-subnode-body"><p className="audit-empty">fast compiler 未提供工具。</p></div>
+        </details>
+        <details className="audit-subnode audit-persisted-output">
+          <summary>
+            <span>主模型最终思绪原文</span>
+            <AuditBadge tone="persisted">compiler 输入</AuditBadge>
+          </summary>
+          <div className="audit-subnode-body"><p>{finalPrimaryOutput || "没有可展示的主模型最终输出。"}</p></div>
+        </details>
+        <RawCallPayload call={call} />
+        <details className="audit-subnode">
+          <summary>fast 模型返回的 JSON</summary>
+          <pre>{call.response_json?.content || "（没有返回内容）"}</pre>
+        </details>
+        <details className="audit-subnode audit-parse-result" open>
+          <summary>
+            <span>解析结果</span>
+            <AuditBadge tone={invalid ? "failure" : "execution"}>
+              {invalid ? "校验失败" : parsedStatus ?? call.status}
+            </AuditBadge>
+          </summary>
+          <div className="audit-subnode-body">
+            {revisionReasons.length > 0 && (
+              <div className="audit-revision-reasons">
+                <strong>要求主模型修订</strong>
+                <ul>{revisionReasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+              </div>
+            )}
+            {proposals.length > 0 ? proposals.map((proposal) => (
+              <article className="audit-action" key={proposal.id}>
+                <header>
+                  <strong>动作 {proposal.ordinal + 1} · {actionLabel(proposal.proposal_type)}</strong>
+                  <AuditBadge tone="execution">{proposal.status}</AuditBadge>
+                </header>
+                {typeof proposal.payload?.content === "string" && <p>{proposal.payload.content}</p>}
+                <small>{proposalResultCopy(proposal)}</small>
+                {proposal.last_error_message && <small>{proposal.last_error_message}</small>}
+              </article>
+            )) : (
+              <p className="audit-empty">
+                {parsedStatus === "accepted" ? "解析成功，没有动作候选。" : "本次解析没有生成已提交的动作。"}
+              </p>
+            )}
+          </div>
+        </details>
+      </div>
+    </details>
+  );
 }
 
 export default function ThoughtRunsPage({
@@ -390,13 +813,25 @@ export default function ThoughtRunsPage({
     () => (detail?.calls ?? []).filter((call) => isPrimaryAgentPurpose(call.purpose)),
     [detail],
   );
-  const contextSections = useMemo(
-    () => collectContextSections(primaryContextCalls),
+  const contextOutline = useMemo(
+    () => buildThoughtContextOutline(primaryContextCalls),
     [primaryContextCalls],
   );
   const systemInstructions = useMemo(() => {
     return collectPrimarySystemInstructions(detail?.calls ?? []);
   }, [detail]);
+  const compilerCalls = useMemo(
+    () => (detail?.calls ?? []).filter((call) => call.purpose === "compiler"),
+    [detail],
+  );
+  const finalNaturalCall = useMemo(() => [...primaryContextCalls].reverse().find((call) => (
+    call.status === "succeeded" &&
+    Boolean(call.response_json?.content?.trim()) &&
+    !(call.response_json?.toolCalls?.length)
+  )) ?? null, [primaryContextCalls]);
+  const contextRunsById = useMemo(() => new Map(
+    (detail?.contextRuns ?? []).map((run) => [run.id, run]),
+  ), [detail]);
 
   return (
     <section className="page-panel thought-runs-page">
@@ -471,7 +906,13 @@ export default function ThoughtRunsPage({
                 <header>
                   <div className="inspector-heading">
                     <span>{detail.run.conversation_title} · {triggerLabel(detail.run.trigger_type)}</span>
-                    <h2>{detail.run.summary ?? "无结论"}</h2>
+                    <h2>
+                      <LuCircle className={`run-dot state-${detail.run.status}`} aria-hidden />
+                      {detail.run.status === "completed"
+                        ? "Thought 已成功生成"
+                        : detail.run.status === "running" ? "Thought 正在生成" : "Thought 生成失败"}
+                      <small>· 会话第 {detail.run.turn_ordinal} 次 · 上下文第 {detail.run.context_epoch_ordinal} 段</small>
+                    </h2>
                   </div>
                   <div className="inspector-actions">
                     <span className={`run-state state-${detail.run.status}`}>{stateLabel(detail.run.status)}</span>
@@ -490,160 +931,199 @@ export default function ThoughtRunsPage({
                 </header>
                 <div className="thought-inspector-body">
                   <div className="thought-inspector-content">
-                    <div className="context-epoch-note">
-                      <LuShieldCheck aria-hidden />
-                      <div>
-                        <strong>会话隔离 · 当前上下文第 {detail.run.current_epoch_ordinal} 段</strong>
-                        <p>
-                          这条 Thought 属于第 {detail.run.context_epoch_ordinal} 段。
-                          {detail.run.context_epoch_ordinal < detail.run.current_epoch_ordinal
-                            ? " 它是重置前的历史记录，不会再进入后续上下文。"
-                            : " 同一段内的已提交消息与思绪会传给下一轮。"}
-                        </p>
+                    <details className="audit-panel audit-stats-panel" open>
+                      <summary>
+                        <span className="audit-panel-title"><LuBrainCircuit aria-hidden /><strong>思绪统计状态</strong></span>
+                        <AuditBadge tone={detail.run.status === "completed" ? "persisted" : "failure"}>
+                          {stateLabel(detail.run.status)}
+                        </AuditBadge>
+                      </summary>
+                      <div className="audit-panel-body">
+                        <dl className="thought-facts">
+                          <div><dt>思绪上下文段</dt><dd>第 {detail.run.context_epoch_ordinal} 段</dd></div>
+                          <div><dt>会话内 Thought</dt><dd>第 {detail.run.turn_ordinal} 次</dd></div>
+                          <div><dt>本次调用轮次</dt><dd>主模型 {primaryContextCalls.length} 次 · fast {compilerCalls.length} 次</dd></div>
+                          <div><dt>触发原因</dt><dd>{detail.run.trigger_reason}</dd></div>
+                          <div><dt>开始时间</dt><dd>{formatDateTime(detail.run.started_at)}</dd></div>
+                          <div><dt>结束时间</dt><dd>{formatDateTime(detail.run.completed_at)}</dd></div>
+                          <div><dt>任务尝试</dt><dd>{detail.run.job_attempt_count} / {detail.run.job_max_attempts}</dd></div>
+                          <div><dt>新增消息</dt><dd>{contextOutline.currentMessages.length} 条</dd></div>
+                          <div><dt>最终决策</dt><dd>{detail.run.decision ?? "没有动作"}</dd></div>
+                          <div><dt>上下文状态</dt><dd>
+                            {detail.run.context_epoch_ordinal < detail.run.current_epoch_ordinal
+                              ? "重置前历史段" : "当前活动段"}
+                          </dd></div>
+                        </dl>
                       </div>
-                    </div>
+                    </details>
 
-                    <dl className="thought-facts">
-                      <div><dt>触发原因</dt><dd>{detail.run.trigger_reason}</dd></div>
-                      <div><dt>开始时间</dt><dd>{formatDateTime(detail.run.started_at)}</dd></div>
-                      <div><dt>结束时间</dt><dd>{formatDateTime(detail.run.completed_at)}</dd></div>
-                      <div><dt>模型调用</dt><dd>{detail.calls.length} 轮</dd></div>
-                      <div><dt>新消息范围</dt><dd>{detail.run.new_message_start_id ? "本轮已记录" : "没有新消息"}</dd></div>
-                      <div><dt>最终决策</dt><dd>{detail.run.decision ?? "—"}</dd></div>
-                    </dl>
+                    <details className="audit-panel audit-primary-panel" open>
+                      <summary>
+                        <span className="audit-panel-title"><LuListTree aria-hidden /><strong>主模型上下文</strong></span>
+                        <span className="audit-summary-badges">
+                          <AuditBadge tone="current">原始内容优先</AuditBadge>
+                          <AuditBadge tone="persisted">可还原后续上下文</AuditBadge>
+                        </span>
+                      </summary>
+                      <div className="audit-panel-body">
+                        <div className="audit-legend">
+                          <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
+                          <AuditBadge tone="fixed">固定配置</AuditBadge>
+                          <AuditBadge tone="current">本次输入</AuditBadge>
+                          <AuditBadge tone="execution">仅执行记录</AuditBadge>
+                          <p>“进入后续上下文”表示会成为下一次主模型输入；调用审计本身仍统一保存于 PostgreSQL。</p>
+                        </div>
 
-                    <section className="thought-context-map">
-                    <header>
-                      <div><LuListTree aria-hidden /><h3>主 Agent 上下文构成</h3></div>
-                      <p>这里只汇总主 Agent 实际读取的内容；fast compiler 的结构化约束留在对应调用中。</p>
-                    </header>
-
-                    {systemInstructions.length > 0 && (
-                      <section className="context-source-section system-source">
-                        <header>
-                          <LuShieldCheck aria-hidden />
-                          <div>
-                            <h4>主 Agent 行为指令</h4>
-                            <p>每次主 Agent 请求携带一次；工具续轮复用同一份，不会累积副本。</p>
+                        <details className="audit-node" open>
+                          <summary>
+                            <span className="audit-node-title"><LuShieldCheck aria-hidden /><strong>系统提示词</strong></span>
+                            <AuditBadge tone="fixed">每次请求发送一次</AuditBadge>
+                          </summary>
+                          <div className="audit-node-body">
+                            {systemInstructions.map((instruction) => (
+                              <details className="audit-subnode" key={instruction.content}>
+                                <summary>{instruction.label}</summary>
+                                <pre>{instruction.content}</pre>
+                              </details>
+                            ))}
                           </div>
-                          <span>{systemInstructions.length} 类</span>
-                        </header>
-                        {systemInstructions.map((instruction) => (
-                          <details
-                            className={`instruction-${instruction.kind}`}
-                            key={`${instruction.kind}-${instruction.content}`}
-                          >
+                        </details>
+
+                        <details className="audit-node" open>
+                          <summary>
+                            <span className="audit-node-title"><LuWrench aria-hidden /><strong>工具列表</strong></span>
+                            <AuditBadge tone="fixed">提供 {contextOutline.tools.length} 个</AuditBadge>
+                          </summary>
+                          <div className="audit-node-body"><ToolDefinitionList items={contextOutline.tools} /></div>
+                        </details>
+
+                        {contextOutline.compression.map((item) => (
+                          <details className="audit-node audit-persisted-output" key={item.id}>
                             <summary>
-                              <span>{instruction.label}</span>
-                              <small>{instruction.description}</small>
+                              <span className="audit-node-title"><strong>上一上下文段摘要</strong></span>
+                              <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
                             </summary>
-                            <p>{instruction.content}</p>
+                            <div className="audit-node-body"><p>{item.content}</p></div>
                           </details>
                         ))}
-                      </section>
-                    )}
 
-                    {contextSections.map((section) => {
-                      const copy = contextSectionCopy[section.key];
-                      const Icon = copy.icon;
-                      return (
-                        <section className={`context-source-section source-${section.key}`} key={section.key}>
-                          <header>
-                            <Icon aria-hidden />
-                            <div><h4>{copy.title}</h4><p>{copy.description}</p></div>
-                            <span>{section.items.length} 项</span>
-                          </header>
-                          <div className="context-source-items">
-                            {section.items.map((item) => (
-                              <article key={item.id}>
-                                <strong>{contextItemTitle(item)}</strong>
-                                {item.itemType === "tool_definition" ? (
-                                  <>
-                                    <p>{toolDescription(item.referenceId ?? "", item.content)}</p>
-                                    {item.metadata?.schema && (
-                                      <details className="tool-schema">
-                                        <summary>查看参数约束</summary>
-                                        <pre>{JSON.stringify(item.metadata.schema, null, 2)}</pre>
-                                      </details>
-                                    )}
-                                  </>
-                                ) : item.content && <p>{item.content}</p>}
-                              </article>
-                            ))}
-                          </div>
-                        </section>
-                      );
-                    })}
-                    </section>
-
-                    <section className="thought-process">
-                    <header>
-                      <div><LuBrainCircuit aria-hidden /><h3>本次 Thought 的模型调用</h3></div>
-                      <p>以下只属于本次运行：主模型、只读工具续轮与动作编译按实际请求顺序展开。</p>
-                    </header>
-
-                    {detail.calls.map((call) => {
-                      const toolCalls = call.response_json?.toolCalls ?? [];
-                      const toolResults = call.context_items.filter((item) => item.itemType === "tool_result");
-                      return (
-                        <section className="thought-round" key={call.id}>
-                          <header>
-                            <div>
-                              <span className="round-number">{call.sequence_number}</span>
-                              <strong>{thoughtCallStageLabel(call)}</strong>
-                              <small>{call.profile} · {call.model ?? call.provider}</small>
+                        {contextOutline.initializationMessages.length > 0 && (
+                          <details className="audit-node">
+                            <summary>
+                              <span className="audit-node-title"><strong>首次初始化读取的历史消息</strong></span>
+                              <AuditBadge tone="current">仅首次输入</AuditBadge>
+                            </summary>
+                            <div className="audit-node-body">
+                              <OriginalMessageList items={contextOutline.initializationMessages} />
                             </div>
-                            <span>{call.input_tokens ?? 0} in / {call.output_tokens ?? 0} out · {call.latency_ms ?? 0} ms</span>
-                          </header>
-
-                          <NaturalOutput call={call} />
-
-                          {toolCalls.length > 0 && (
-                            <div className="tool-call-list">
-                              {toolCalls.map((toolCall) => {
-                                const result = toolResults.find((item) => item.referenceId === toolCall.id);
-                                return (
-                                  <article key={toolCall.id}>
-                                    <header>
-                                      <LuWrench aria-hidden />
-                                      <div>
-                                        <strong>{toolLabel(toolCall.function.name)}</strong>
-                                        <span>{describeToolArguments(toolCall.function.name, toolCall.function.arguments)}</span>
-                                      </div>
-                                      <em>{result?.metadata?.ok === false ? "失败" : "只读"}</em>
-                                    </header>
-                                    {result && <ToolResultView item={result} />}
-                                  </article>
-                                );
-                              })}
-                            </div>
-                          )}
-
-                          {!(["primary", "tool_continuation", "revision"].includes(call.purpose)) && call.response_json?.content && (
-                            <details className="model-output">
-                              <summary><LuMessageSquareText aria-hidden />查看本轮结构化输出</summary>
-                              <pre>{call.response_json.content}</pre>
-                            </details>
-                          )}
-
-                          <details className="model-context">
-                            <summary><LuListTree aria-hidden />查看本轮完整模型载荷</summary>
-                            <p className="model-payload-note">
-                              {call.purpose === "compiler"
-                                ? "这是 fast compiler 的独立请求；JSON 输出格式约束只服务于动作编译，不属于主 Agent 上下文。"
-                                : "这是主 Agent 的一次独立请求；工具续轮会重发同一行为指令，不会逐轮追加副本。"}
-                            </p>
-                            {call.request_context.map((message, index) => (
-                              <article key={`${call.id}-message-${index}`}>
-                                <span>{roleLabel(message)}</span>
-                                <pre>{message.content || (message.tool_calls?.length ? "模型请求调用只读工具" : "（空内容）")}</pre>
-                              </article>
-                            ))}
                           </details>
-                        </section>
-                      );
-                    })}
-                    </section>
+                        )}
+
+                        {contextOutline.previousTurns.map((turn) => (
+                          <PersistedTurnNode
+                            key={turn.thoughtRunId}
+                            turn={turn}
+                            run={contextRunsById.get(turn.thoughtRunId)}
+                            onOpen={() => setSelectedId(turn.thoughtRunId)}
+                          />
+                        ))}
+
+                        {contextOutline.unassignedHistoryMessages.length > 0 && (
+                          <details className="audit-node">
+                            <summary>
+                              <span className="audit-node-title"><strong>旧版未分组的历史消息</strong></span>
+                              <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
+                            </summary>
+                            <div className="audit-node-body">
+                              <OriginalMessageList items={contextOutline.unassignedHistoryMessages} />
+                            </div>
+                          </details>
+                        )}
+
+                        <details className="audit-node audit-current-turn" open>
+                          <summary>
+                            <span className="audit-node-title">
+                              <LuBrainCircuit aria-hidden />
+                              <strong>第 {detail.run.turn_ordinal} 次 Thought</strong>
+                            </span>
+                            <span className="audit-summary-badges">
+                              <AuditBadge tone="current">本次</AuditBadge>
+                              <AuditBadge tone="persisted">成功后进入后续上下文</AuditBadge>
+                            </span>
+                          </summary>
+                          <div className="audit-node-body">
+                            <details className="audit-subnode" open>
+                              <summary>
+                                <span>读取到的原始消息</span>
+                                <AuditBadge tone="current">{contextOutline.currentMessages.length} 条</AuditBadge>
+                              </summary>
+                              <div className="audit-subnode-body">
+                                <OriginalMessageList items={contextOutline.currentMessages} />
+                              </div>
+                            </details>
+
+                            <details className="audit-subnode">
+                              <summary>
+                                <span>被动记忆召回</span>
+                                <span className="audit-summary-badges">
+                                  <AuditBadge tone="current">本次输入</AuditBadge>
+                                  {!contextOutline.recalledMemories.length && <AuditBadge tone="fixed">尚未实现</AuditBadge>}
+                                </span>
+                              </summary>
+                              <div className="audit-subnode-body">
+                                {contextOutline.recalledMemories.length ? contextOutline.recalledMemories.map((item) => (
+                                  <article className="audit-memory" key={item.id}>
+                                    <strong>{item.title}</strong><p>{item.content}</p>
+                                  </article>
+                                )) : <p className="audit-empty">本次没有被动召回记忆；审核记忆库仍未接入运行时。</p>}
+                              </div>
+                            </details>
+
+                            <div className="audit-call-stack">
+                              {primaryContextCalls.map((call, index) => (
+                                <PrimaryCallNode
+                                  key={call.id}
+                                  call={call}
+                                  calls={primaryContextCalls}
+                                  ordinal={index + 1}
+                                />
+                              ))}
+                            </div>
+
+                            <details className="audit-subnode audit-persisted-output" open>
+                              <summary>
+                                <span>最后一轮思绪输出</span>
+                                <AuditBadge tone="persisted">原文进入后续上下文</AuditBadge>
+                              </summary>
+                              <div className="audit-subnode-body">
+                                <p>{finalNaturalCall?.response_json?.content || "尚未形成可提交的最终思绪。"}</p>
+                              </div>
+                            </details>
+                          </div>
+                        </details>
+                      </div>
+                    </details>
+
+                    <details className="audit-panel audit-fast-panel" open>
+                      <summary>
+                        <span className="audit-panel-title"><LuMessageSquareText aria-hidden /><strong>快速模型上下文</strong></span>
+                        <AuditBadge tone="execution">不进入主模型上下文</AuditBadge>
+                      </summary>
+                      <div className="audit-panel-body">
+                        {compilerCalls.length ? compilerCalls.map((call, index) => (
+                          <CompilerCallNode
+                            key={call.id}
+                            call={call}
+                            ordinal={index + 1}
+                            proposals={detail.proposals.filter((proposal) => (
+                              proposal.compiler_llm_call_id === call.id
+                            ))}
+                            finalPrimaryOutput={finalNaturalCall?.response_json?.content ?? null}
+                            invalid={detail.run.compiler_state?.invalidCallIds?.includes(call.id) ?? false}
+                          />
+                        )) : <p className="audit-empty">本次尚未执行 fast compiler。</p>}
+                      </div>
+                    </details>
                   </div>
                 </div>
               </>

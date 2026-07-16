@@ -164,12 +164,13 @@ test("memory prompt sends structured identity-bearing context, never identity-fr
   assert.match(request.messages[0].content, /subjectId/);
 });
 
-test("thought request uses primary natural Markdown without structured-output mode", () => {
+test("thought request uses Chinese natural Markdown without structured-output mode", () => {
   const request = cognitionRequest("thought_tick", contextFixture());
   assert.equal(request.profile, "primary");
   assert.equal(request.maxOutputTokens, 4_096);
   assert.equal(request.responseSchema, undefined);
-  assert.match(request.messages[0].content, /natural Markdown, not JSON/);
+  assert.match(request.messages[0].content, /简体中文/);
+  assert.match(request.messages[0].content, /不要输出 JSON/);
 });
 
 test("the same message window keeps stable output idempotency despite model drift", () => {
