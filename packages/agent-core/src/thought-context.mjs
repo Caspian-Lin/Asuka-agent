@@ -50,19 +50,34 @@ function sourceIdentity(source) {
 
 export function sourceToChatMessage(source, section = "source") {
   const identity = sourceIdentity(source);
-  const label = identity.author_kind === "agent"
-    ? "Asuka previously said"
+  const speakerName = identity.author_kind === "agent"
+    ? "Asuka"
+    : identity.sender_display_name || identity.sender_id || "未知成员";
+  const sourceLabel = identity.author_kind === "agent"
+    ? "Asuka 之前的消息"
     : identity.author_kind === "system"
-      ? "System event"
-      : "Conversation message";
+      ? "系统事件"
+      : "会话消息";
+  const identityReference = identity.sender_id && identity.sender_id !== speakerName
+    ? `；身份引用=${identity.sender_id}`
+    : "";
+  const replyReference = identity.reply_to ? `；回复=${identity.reply_to}` : "";
   return {
     role: identity.author_kind === "agent" ? "assistant" : "user",
     content: [
-      `[${label}; section=${section}]`,
-      JSON.stringify(identity),
-      String(source.content),
+      `[${sourceLabel}；来源=${section}；说话人=${speakerName}${identityReference}；消息引用=${identity.message_id}；时间=${identity.sent_at}；会话=${identity.conversation_type}${replyReference}]`,
+      `${speakerName}：${String(source.content)}`,
     ].join("\n"),
   };
+}
+
+export function shouldUseInitializationHistory({
+  epochOrdinal,
+  committedTurnCount,
+  hasCompression,
+}) {
+  return Number(epochOrdinal) === 1 && Number(committedTurnCount) === 0 &&
+    hasCompression !== true;
 }
 
 export function selectInitializationHistory({

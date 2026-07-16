@@ -9,6 +9,10 @@ import {
   createOutboundService,
   OutboundRequestError,
 } from "./outbound-service.mjs";
+import {
+  createThoughtStreamService,
+  ThoughtStreamRequestError,
+} from "./thought-stream-service.mjs";
 
 const host = process.env.CONTROL_API_HOST ?? "127.0.0.1";
 const port = positiveInteger(process.env, "CONTROL_API_PORT", 3002);
@@ -351,6 +355,103 @@ const outboundRepository = {
 
 const outboundService = createOutboundService({ repository: outboundRepository });
 
+const thoughtStreamRepository = {
+  async resetConversation({ conversationId, resetId, now }) {
+    return sql.begin(async (tx) => {
+      const rows = await tx`
+        SELECT stream.id, stream.status, stream.current_epoch_ordinal,
+               stream.committed_message_at, stream.committed_message_id,
+               stream.lease_owner, stream.lease_expires_at
+        FROM thought_streams AS stream
+        JOIN conversations AS conversation ON conversation.id = stream.conversation_id
+        WHERE stream.conversation_id = ${conversationId}
+          AND stream.agent_id = 'agent-asuka'
+          AND conversation.agent_id = 'agent-asuka'
+        FOR UPDATE OF stream
+      `;
+      const stream = rows[0];
+      if (!stream) return { outcome: "not_found" };
+      if (stream.status !== "active") return { outcome: "inactive" };
+      const leaseActive = stream.lease_owner && stream.lease_expires_at &&
+        new Date(stream.lease_expires_at) > now;
+      if (leaseActive) return { outcome: "busy" };
+
+      const previousEpochOrdinal = Number(stream.current_epoch_ordinal);
+      const currentEpochOrdinal = previousEpochOrdinal + 1;
+      await tx`
+        UPDATE thought_runs
+        SET status = 'failed', processing_stage = 'failed',
+            summary = '短期上下文已由操作员重置', completed_at = ${now}
+        WHERE stream_id = ${stream.id} AND status = 'running'
+      `;
+      const latestRuns = await tx`
+        SELECT thought.id
+        FROM thought_runs AS thought
+        JOIN thought_stream_epochs AS epoch ON epoch.id = thought.epoch_id
+        WHERE thought.stream_id = ${stream.id}
+          AND epoch.ordinal = ${previousEpochOrdinal}
+          AND thought.status = 'completed'
+        ORDER BY thought.turn_ordinal DESC
+        LIMIT 1
+      `;
+      await tx`
+        UPDATE thought_stream_epochs
+        SET status = 'closed', completed_at = COALESCE(completed_at, ${now}),
+            covers_through_thought_run_id = COALESCE(
+              covers_through_thought_run_id,
+              ${latestRuns[0]?.id ?? null}
+            )
+        WHERE stream_id = ${stream.id}
+          AND ordinal = ${previousEpochOrdinal}
+          AND status IN ('active', 'compressing')
+      `;
+      const updated = await tx`
+        UPDATE thought_streams
+        SET current_epoch_ordinal = ${currentEpochOrdinal},
+            version = version + 1,
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = NULL,
+            updated_at = ${now}
+        WHERE id = ${stream.id}
+        RETURNING committed_message_at, committed_message_id, version
+      `;
+      await tx`
+        INSERT INTO events (
+          id, conversation_id, event_type, source_type, payload_json,
+          correlation_id, created_at
+        ) VALUES (
+          ${`event:thought-context-reset:${resetId}`}, ${conversationId},
+          'thought_context_reset', 'operator',
+          ${tx.json({
+            streamId: String(stream.id),
+            previousEpochOrdinal,
+            currentEpochOrdinal,
+          })}, ${`thought-context-reset:${resetId}`}, ${now}
+        )
+      `;
+      return {
+        outcome: "reset",
+        stream: {
+          id: String(stream.id),
+          conversationId,
+          previousEpochOrdinal,
+          currentEpochOrdinal,
+          committedMessageAt: updated[0].committed_message_at,
+          committedMessageId: updated[0].committed_message_id,
+          version: Number(updated[0].version),
+          resetAt: now,
+        },
+      };
+    });
+  },
+};
+
+const thoughtStreams = createThoughtStreamService({
+  repository: thoughtStreamRepository,
+  randomId: randomUUID,
+});
+
 class RequestError extends Error {
   constructor(code, message, status = 400) {
     super(message);
@@ -411,13 +512,38 @@ async function getImSnapshot(conversationId) {
              c.created_at, c.updated_at,
              count(m.id)::int AS message_count,
              count(m.id) FILTER (
-               WHERE m.role = 'user' AND m.read_at IS NULL
+               WHERE m.author_kind = 'user'
+                 AND m.direction = 'inbound'
+                 AND m.read_at IS NULL
+                 AND (
+                   stream.committed_message_at IS NULL
+                   OR (m.created_at, m.id) > (
+                     stream.committed_message_at,
+                     stream.committed_message_id
+                   )
+                 )
              )::int AS unread_count,
-             max(m.created_at) AS last_message_at
+             count(m.id) FILTER (
+               WHERE m.author_kind = 'user'
+                 AND m.direction = 'inbound'
+                 AND (
+                   stream.committed_message_at IS NULL
+                   OR (m.created_at, m.id) > (
+                     stream.committed_message_at,
+                     stream.committed_message_id
+                   )
+                 )
+             )::int AS thought_unread_count,
+             max(m.created_at) AS last_message_at,
+             stream.status AS thought_stream_status,
+             stream.current_epoch_ordinal AS thought_epoch_ordinal,
+             stream.committed_message_at AS thought_committed_message_at
       FROM conversations c
       LEFT JOIN messages m ON m.conversation_id = c.id
+      LEFT JOIN thought_streams AS stream
+        ON stream.agent_id = c.agent_id AND stream.conversation_id = c.id
       WHERE c.agent_id = 'agent-asuka' AND c.channel = 'napcat'
-      GROUP BY c.id
+      GROUP BY c.id, stream.id
       ORDER BY last_message_at DESC NULLS LAST, c.updated_at DESC
     `,
   ]);
@@ -429,16 +555,33 @@ async function getImSnapshot(conversationId) {
   const messageRows = selectedId
     ? await sql`
         SELECT * FROM (
-          SELECT m.id, m.conversation_id, m.role, m.content, m.read_at,
-                 m.created_at, d.sender_id,
+          SELECT m.id, m.conversation_id, m.role, m.content,
                  COALESCE(
-                   NULLIF(d.raw_payload -> 'sender' ->> 'card', ''),
-                   NULLIF(d.raw_payload -> 'sender' ->> 'nickname', ''),
-                   d.sender_id,
+                   m.read_at,
+                   CASE
+                     WHEN stream.committed_message_at IS NOT NULL
+                       AND (m.created_at, m.id) <= (
+                         stream.committed_message_at,
+                         stream.committed_message_id
+                       )
+                     THEN stream.updated_at
+                     ELSE NULL
+                   END
+                 ) AS read_at,
+                 m.created_at, m.sender_id,
+                 COALESCE(
+                   NULLIF(m.sender_display_name, ''),
+                   participant.display_name,
+                   m.sender_id,
                    CASE WHEN m.role = 'assistant' THEN 'Asuka Agent' ELSE '未知成员' END
                  ) AS sender_name
           FROM messages m
-          LEFT JOIN inbound_deliveries d ON d.id = m.id
+          LEFT JOIN thought_streams AS stream
+            ON stream.conversation_id = m.conversation_id
+           AND stream.agent_id = 'agent-asuka'
+          LEFT JOIN conversation_participants AS participant
+            ON participant.conversation_id = m.conversation_id
+           AND participant.participant_id = m.sender_id
           WHERE m.conversation_id = ${selectedId}
           ORDER BY m.created_at DESC
           LIMIT 200
@@ -477,7 +620,11 @@ async function listThoughtRuns() {
            thought.job_run_id, thought.correlation_id, thought.trigger_type,
            thought.trigger_reason, thought.status, thought.decision,
            thought.summary, thought.started_at, thought.completed_at,
-           thought.created_at, job.job_type,
+           thought.created_at, job.job_type, thought.turn_ordinal,
+           epoch.ordinal AS context_epoch_ordinal,
+           stream.status AS stream_status,
+           stream.current_epoch_ordinal,
+           stream.committed_message_at, stream.updated_at AS stream_updated_at,
            COALESCE(call_stats.call_count, 0)::int AS call_count,
            COALESCE(call_stats.input_tokens, 0)::int AS input_tokens,
            COALESCE(call_stats.output_tokens, 0)::int AS output_tokens,
@@ -486,6 +633,8 @@ async function listThoughtRuns() {
            COALESCE(output_stats.candidate_count, 0)::int AS candidate_count
     FROM thought_runs thought
     JOIN conversations conversation ON conversation.id = thought.conversation_id
+    JOIN thought_streams stream ON stream.id = thought.stream_id
+    JOIN thought_stream_epochs epoch ON epoch.id = thought.epoch_id
     JOIN job_runs run ON run.id = thought.job_run_id
     JOIN jobs job ON job.id = run.job_id
     LEFT JOIN LATERAL (
@@ -512,16 +661,22 @@ async function listThoughtRuns() {
 async function getThoughtRunDetail(thoughtRunId) {
   const runs = await sql`
     SELECT thought.*, conversation.title AS conversation_title,
-           conversation.external_id, job.name AS job_name, job.job_type
+           conversation.external_id, job.name AS job_name, job.job_type,
+           epoch.ordinal AS context_epoch_ordinal,
+           stream.status AS stream_status,
+           stream.current_epoch_ordinal,
+           stream.committed_message_at, stream.updated_at AS stream_updated_at
     FROM thought_runs thought
     JOIN conversations conversation ON conversation.id = thought.conversation_id
+    JOIN thought_streams stream ON stream.id = thought.stream_id
+    JOIN thought_stream_epochs epoch ON epoch.id = thought.epoch_id
     JOIN job_runs run ON run.id = thought.job_run_id
     JOIN jobs job ON job.id = run.job_id
     WHERE thought.id = ${thoughtRunId} AND thought.agent_id = 'agent-asuka'
     LIMIT 1
   `;
   if (!runs[0]) throw new RequestError("thought_run_not_found", "思绪运行不存在", 404);
-  const [calls, outputs, candidates, proposals] = await Promise.all([
+  const [calls, outputs, candidates, proposals, participants] = await Promise.all([
     sql`
       SELECT call.id, call.sequence_number, call.purpose, call.profile, call.provider,
              call.model, call.prompt_version, call.status, call.error_code,
@@ -570,8 +725,14 @@ async function getThoughtRunDetail(thoughtRunId) {
       WHERE thought_run_id = ${thoughtRunId}
       ORDER BY ordinal
     `,
+    sql`
+      SELECT participant_id, display_name, aliases
+      FROM conversation_participants
+      WHERE conversation_id = ${runs[0].conversation_id}
+      ORDER BY first_seen_at, participant_id
+    `,
   ]);
-  return { run: runs[0], calls, outputs, candidates, proposals };
+  return { run: runs[0], calls, outputs, candidates, proposals, participants };
 }
 
 async function listMemoryCandidates() {
@@ -683,6 +844,22 @@ const server = http.createServer(async (request, response) => {
       sendJson(response, 200, { thoughtRuns: await listThoughtRuns() }, origin);
       return;
     }
+    const thoughtStreamResetRoute = url.pathname.match(
+      /^\/api\/thought-streams\/([^/]+)\/reset$/,
+    );
+    if (thoughtStreamResetRoute && request.method === "POST") {
+      sendJson(
+        response,
+        200,
+        {
+          stream: await thoughtStreams.resetConversation(
+            decodeURIComponent(thoughtStreamResetRoute[1]),
+          ),
+        },
+        origin,
+      );
+      return;
+    }
     const thoughtRunRoute = url.pathname.match(/^\/api\/thought-runs\/([^/]+)$/);
     if (thoughtRunRoute && request.method === "GET") {
       sendJson(
@@ -775,7 +952,8 @@ const server = http.createServer(async (request, response) => {
     const expected = error instanceof LlmConfigurationError ||
       error instanceof RequestError ||
       error instanceof JobRequestError ||
-      error instanceof OutboundRequestError;
+      error instanceof OutboundRequestError ||
+      error instanceof ThoughtStreamRequestError;
     console.error("control API request failed", {
       code: expected ? error.code : "internal_error",
       message: expected ? error.message : "unexpected request failure",

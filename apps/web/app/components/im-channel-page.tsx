@@ -16,7 +16,11 @@ type ImConversation = {
   status: string;
   message_count: number;
   unread_count: number;
+  thought_unread_count: number;
   last_message_at: string | null;
+  thought_stream_status: string | null;
+  thought_epoch_ordinal: number | null;
+  thought_committed_message_at: string | null;
 };
 
 type ImChannel = {
@@ -141,7 +145,7 @@ export default function ImChannelPage() {
           <h1>IM Channel</h1>
           <p>只保留白名单 QQ 群和私聊联系人消息。WebSocket 事件先进入不可变接收箱，再由 worker 投影为可读会话。</p>
         </div>
-        <div className="hero-stat"><strong>{totalUnread}</strong><span>未读消息</span></div>
+        <div className="hero-stat"><strong>{totalUnread}</strong><span>界面未读消息</span></div>
       </div>
 
       {channels.length === 0 ? (
@@ -173,7 +177,18 @@ export default function ImChannelPage() {
                         className={snapshot?.selectedConversationId === conversation.id ? "active" : ""}
                         onClick={() => void load(conversation.id)}
                       >
-                        <span><strong>{conversation.title}</strong><small>{conversation.message_count} 条 · {formatDateTime(conversation.last_message_at)}</small></span>
+                        <span>
+                          <strong>{conversation.title}</strong>
+                          <small>{conversation.message_count} 条 · {formatDateTime(conversation.last_message_at)}</small>
+                          <small>
+                            {conversation.thought_unread_count > 0
+                              ? `${conversation.thought_unread_count} 条待思绪读取`
+                              : "思绪已读取最新消息"}
+                            {conversation.thought_epoch_ordinal
+                              ? ` · 上下文第 ${conversation.thought_epoch_ordinal} 段`
+                              : ""}
+                          </small>
+                        </span>
                         {conversation.unread_count > 0 && <em>{conversation.unread_count}</em>}
                       </button>
                     ))}

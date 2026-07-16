@@ -1,8 +1,8 @@
 # Asuka Agent：需求与开发设计文档
 
-> 文档版本：0.6.3（EVA 二号机主题）
+> 文档版本：0.6.4（会话级思绪生命周期）
 >
-> 更新时间：2026-07-16
+> 更新时间：2026-07-17
 >
 > 状态：NapCat QQ 双向接入、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、primary 自然思绪/只读工具循环、fast 动作编译和受硬策略控制的自主外发已实现；正式记忆召回继续按依赖链实现
 >
@@ -192,6 +192,9 @@ flowchart TD
 - 保存 trigger 类型、原因、时间、状态、简短结论和决策；
 - 支持一轮或多轮 LLM 调用，每轮保存实际上下文、模型输出、延迟和 token；
 - message、memory、tool、external source 都以结构化 context item 引用；
+- 控制台按会话组织 Thought Run，并明确区分 system、历史消息/思绪、本轮未读与工具调用；
+- 允许操作员重置单个会话的短期上下文；重置开启空 epoch，但不删除审计记录、不回退已消费消息 watermark；
+- Thought 成功消费消息时同时推进 Stream watermark 与消息已读状态，IM 页面展示独立的待思绪读取数；
 - 普通查看不提供数据标注；未来标注台必须独立实现。
 
 #### FR-06 回归评测（暂缓）
@@ -408,7 +411,7 @@ Thought Stream v2 在现有运行记录之上增加持续状态，不把一个 j
 | `llm_calls` | `thought_run_id + sequence` | primary、tool continuation、fast compiler、revision 和 compression 的实际调用 |
 | `action_proposals` | `thought_run_id` | `reply/memory/task/no_action` 等结构化候选，不代表已执行 |
 
-旧 epoch 的运行和调用记录不删除。压缩只改变后续上下文投影，必须能从 compression output 追溯到被覆盖的 Turn。
+旧 epoch 的运行和调用记录不删除。压缩只改变后续上下文投影，必须能从 compression output 追溯到被覆盖的 Turn。操作员重置同样关闭当前 epoch，但新 epoch 不携带 compression output 或初始化历史；Stream 的 committed message watermark 保持不变，因此旧消息不会重新作为未读来源进入模型。
 
 ### 8.6 评测数据（设计保留，当前未实现）
 
@@ -486,6 +489,7 @@ Web 只调用本地 PostgreSQL control API，默认监听 `127.0.0.1:3002`：
 | GET | `/api/job-runs/:runId` | 查询模型审计、结构化结果和 watermark |
 | GET | `/api/thought-runs` | 查询真实思绪过程、触发、耗时与 token 汇总 |
 | GET | `/api/thought-runs/:runId` | 查询逐轮上下文、模型输出和引用来源 |
+| POST | `/api/thought-streams/:conversationId/reset` | 关闭当前上下文段并让该会话从空短期上下文开始；保留消息 watermark 与审计记录 |
 | GET | `/api/memories` | 查询由思绪产生的 PostgreSQL 记忆候选 |
 | GET | `/api/llm/settings` | 查询双档配置与 Key 状态，不返回密钥或掩码原文 |
 | PUT | `/api/llm/settings/:profile` | 保存 `primary | fast` 配置；空 Key 保留原值 |
@@ -576,9 +580,9 @@ contradiction_penalty
 + watermark 后的本轮新来源
 ```
 
-上下文消息必须标记 `conversation_type` 和 `author_kind=user|agent|system`。`author_kind=agent` 是 Asuka 自己此前说过的话，不得当成群成员陈述。召回记忆不按 conversation 硬隔离，但必须经过当前参与者、敏感度和 disclosure policy 过滤。
+上下文消息必须标记 `conversation_type` 和 `author_kind=user|agent|system`。`author_kind=agent` 是 Asuka 自己此前说过的话，不得当成群成员陈述。普通消息正文使用首次见到后固定的显示名作为主要说话人标签，稳定 sender ID 只作为身份与证据引用；QQ 后续昵称进入 aliases，不改写既有 ID 到原显示名的映射。召回记忆不按 conversation 硬隔离，但必须经过当前参与者、敏感度和 disclosure policy 过滤。
 
-新消息是必选输入；历史和召回是可裁剪输入。预计下一轮达到可用上下文的 70%–75% 时先压缩，为输出和工具结果保留余量。压缩请求不提供任何工具；原始记录保留，新 epoch 只使用完整压缩输出继续。
+新消息是必选输入；历史和召回是可裁剪输入。预计下一轮达到可用上下文的 70%–75% 时先压缩，为输出和工具结果保留余量。压缩请求不提供任何工具；原始记录保留，新 epoch 只使用完整压缩输出继续。手动重置与压缩不同：它显式丢弃短期上下文摘要，重置后的第一轮也不回填初始化历史，只接收 reset 后到达的未读消息。
 
 相同前缀、固定工具顺序和动态内容置尾可以提高 KV/context cache 命中率，但缓存命中不是正确性保证。完整运行协议与端到端示例见 `docs/scheduled-cognition.md`。
 
@@ -681,9 +685,9 @@ last_success_at / next_run_at
 
 ### 12.4 当前任务控制面
 
-已登记两个不可配置的基础任务：NapCat WebSocket 事件接收、每 5 秒入站投影。认知 worker 与入站循环并行运行，因此模型超时或失败不会阻塞 QQ 落库。`thought_tick` 默认每 15 分钟使用 primary 档生成自然 Markdown 思绪并允许只读工具循环，再由 fast 编译为严格 proposals；compiler 可请求最多两次 primary revision。accepted/no_action proposal、Turn 和 watermark 原子提交。`memory_consolidation` 仍保留每日 03:00 的旧候选整理任务，后续由统一 memory proposal 流程替代。任务使用 `queued → running → retry_wait | succeeded | dead_letter`、job/Stream lease、heartbeat、有限退避和分阶段检查点。完整运行协议见 `docs/scheduled-cognition.md`。
+已登记两个不可配置的基础任务：NapCat WebSocket 事件接收、每 5 秒入站投影。认知 worker 与入站循环并行运行，因此模型超时或失败不会阻塞 QQ 落库。`thought_tick` 默认每 15 分钟使用 primary 档生成自然 Markdown 思绪并允许只读工具循环，再由 fast 编译为严格 proposals；compiler 可请求最多两次 primary revision。accepted/no_action proposal、Turn、Stream watermark、job watermark 与消息 thought-read 状态原子提交。`memory_consolidation` 仍保留每日 03:00 的旧候选整理任务，后续由统一 memory proposal 流程替代。任务使用 `queued → running → retry_wait | succeeded | dead_letter`、job/Stream lease、heartbeat、有限退避和分阶段检查点。完整运行协议见 `docs/scheduled-cognition.md`。
 
-群聊知识空间仍然共享，不按用户硬隔离。每条上下文消息必须携带稳定 `sender_id`、当时显示名、reply target、时间和 message ID；记忆结果分开保存 `source_speaker_id` 与 `subject_id`。确定性校验拒绝上下文外证据、未知 subject、未解析对象上的强行绑定，以及 source 没有实际说出证据的候选。
+群聊知识空间仍然共享，不按用户硬隔离。每条上下文消息必须携带稳定 `sender_id`、首次固定的显示名、reply target、时间和 message ID；新昵称只追加为 alias。记忆结果分开保存 `source_speaker_id` 与 `subject_id`。确定性校验拒绝上下文外证据、未知 subject、未解析对象上的强行绑定，以及 source 没有实际说出证据的候选。
 
 ### 12.5 Thought Stream v2 当前运行协议
 
@@ -697,7 +701,7 @@ trigger
   -> fast 严格 JSON action compiler
   -> accepted | 有界 primary revision
   -> 服务端确定性策略校验
-  -> Turn、proposal 与 watermark 原子提交
+  -> Turn、proposal、watermark 与消息 thought-read 状态原子提交
 ```
 
 primary 应被稳定 system instruction 定义为 Asuka，而不是“扮演 Asuka”。这是应用层的持续身份约定，不宣称模型拥有可验证的主观自我。人格和多人归因微调可以在有评测集后改善稳定性，不是 v2 的前置条件。

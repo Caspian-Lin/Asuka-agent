@@ -12,6 +12,7 @@ import {
 import {
   projectThoughtContext,
   selectInitializationHistory,
+  shouldUseInitializationHistory,
   ThoughtContextError,
 } from "@asuka-agent/agent-core/thought-context";
 import {
@@ -464,6 +465,12 @@ export function createCognitionWorker({
         LIMIT 1
       `;
       if (existing[0]) {
+        if (existing[0].epoch_id !== epochId) {
+          throw new CognitionValidationError(
+            "thought_epoch_reset",
+            "该会话的短期上下文已由操作员重置",
+          );
+        }
         await tx`
           UPDATE thought_runs
           SET status = CASE WHEN primary_output IS NULL THEN 'running' ELSE status END,
@@ -619,7 +626,11 @@ export function createCognitionWorker({
     const candidates = historyRows
       .map((row) => sourceFromRow(row, conversationType))
       .reverse();
-    const initializationHistory = committedTurns.length === 0
+    const initializationHistory = shouldUseInitializationHistory({
+      epochOrdinal: epoch?.ordinal ?? 1,
+      committedTurnCount: committedTurns.length,
+      hasCompression: Boolean(epoch?.compression_output),
+    })
       ? selectInitializationHistory({
           messages: candidates,
           maxCount: historyCount,
@@ -1398,6 +1409,16 @@ export function createCognitionWorker({
         WHERE id = ${thoughtRun.streamId}
       `;
       await tx`
+        UPDATE messages
+        SET read_at = COALESCE(read_at, ${now})
+        WHERE conversation_id = ${thoughtRun.conversationId}
+          AND author_kind = 'user'
+          AND direction = 'inbound'
+          AND (created_at, id) <= (
+            ${thoughtRun.newMessageEndAt}, ${thoughtRun.newMessageEndId}
+          )
+      `;
+      await tx`
         INSERT INTO job_conversation_watermarks (
           job_id, conversation_id, last_message_at, last_message_id,
           last_success_run_id, updated_at
@@ -2031,6 +2052,16 @@ export function createCognitionWorker({
         FROM thought_runs AS thought
         WHERE thought.id = ${thoughtRunId} AND stream.id = thought.stream_id
       `;
+      if (run.job_type === "thought_tick") {
+        await tx`
+          UPDATE messages
+          SET read_at = COALESCE(read_at, ${now})
+          WHERE conversation_id = ${context.conversation.conversation_id}
+            AND author_kind = 'user'
+            AND direction = 'inbound'
+            AND (created_at, id) <= (${lastMessage.sent_at}, ${lastMessage.message_id})
+        `;
+      }
     });
     return metrics;
   }

@@ -21,6 +21,7 @@ test("primary prompt fixes Asuka identity and multi-party attribution without JS
   assert.equal(request.responseSchema, undefined);
   assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /You are Asuka/);
   assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /sender_id/);
+  assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /stable display name/);
   assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /author_kind=agent/);
   assert.match(PRIMARY_THOUGHT_SYSTEM_PROMPT, /natural Markdown, not JSON/);
 });

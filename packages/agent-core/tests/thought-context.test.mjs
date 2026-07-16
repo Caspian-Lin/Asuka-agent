@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   projectThoughtContext,
   selectInitializationHistory,
+  shouldUseInitializationHistory,
   sourceToChatMessage,
   ThoughtContextError,
 } from "../src/thought-context.mjs";
@@ -11,6 +12,7 @@ import {
 function source(id, {
   authorKind = "user",
   senderId = "user-a",
+  senderDisplayName = senderId,
   at = `2026-07-16T00:${String(Number(id.replace(/\D/g, "") || 0)).padStart(2, "0")}:00Z`,
   content = `message ${id}`,
   conversationType = "group",
@@ -20,7 +22,7 @@ function source(id, {
     message_id: id,
     author_kind: authorKind,
     sender_id: senderId,
-    sender_display_name: senderId,
+    sender_display_name: senderDisplayName,
     reply_to: replyTo,
     sent_at: at,
     conversation_type: conversationType,
@@ -49,9 +51,10 @@ test("initialization history is the deduplicated union of last N and recent minu
   );
 });
 
-test("user, Asuka, and private conversation roles stay explicit", () => {
+test("user messages prefer stable names while retaining auditable identity references", () => {
   const userMessage = sourceToChatMessage(source("m1", {
     conversationType: "private",
+    senderDisplayName: "小林",
   }));
   const agentMessage = sourceToChatMessage(source("m2", {
     authorKind: "agent",
@@ -59,11 +62,32 @@ test("user, Asuka, and private conversation roles stay explicit", () => {
     conversationType: "private",
   }));
   assert.equal(userMessage.role, "user");
-  assert.match(userMessage.content, /"conversation_type":"private"/);
-  assert.match(userMessage.content, /"sender_id":"user-a"/);
+  assert.match(userMessage.content, /说话人=小林/);
+  assert.match(userMessage.content, /身份引用=user-a/);
+  assert.match(userMessage.content, /消息引用=m1/);
+  assert.match(userMessage.content, /小林：message m1/);
+  assert.doesNotMatch(userMessage.content, /\{"message_id"/);
   assert.equal(agentMessage.role, "assistant");
-  assert.match(agentMessage.content, /Asuka previously said/);
-  assert.match(agentMessage.content, /"author_kind":"agent"/);
+  assert.match(agentMessage.content, /Asuka 之前的消息/);
+  assert.match(agentMessage.content, /Asuka：message m2/);
+});
+
+test("only the first epoch may bootstrap historical messages", () => {
+  assert.equal(shouldUseInitializationHistory({
+    epochOrdinal: 1,
+    committedTurnCount: 0,
+    hasCompression: false,
+  }), true);
+  assert.equal(shouldUseInitializationHistory({
+    epochOrdinal: 2,
+    committedTurnCount: 0,
+    hasCompression: false,
+  }), false);
+  assert.equal(shouldUseInitializationHistory({
+    epochOrdinal: 1,
+    committedTurnCount: 1,
+    hasCompression: false,
+  }), false);
 });
 
 test("conversation projections never mix sources and retain reply targets", () => {
