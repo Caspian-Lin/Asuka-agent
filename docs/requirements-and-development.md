@@ -1,8 +1,8 @@
 # Asuka Agent：需求与开发设计文档
 
-> 文档版本：0.6.0（Thought Stream v2 与两阶段认知设计）
+> 文档版本：0.6.3（EVA 二号机主题）
 >
-> 更新时间：2026-07-15
+> 更新时间：2026-07-16
 >
 > 状态：NapCat QQ 双向接入、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、primary 自然思绪/只读工具循环、fast 动作编译和受硬策略控制的自主外发已实现；正式记忆召回继续按依赖链实现
 >
@@ -899,7 +899,15 @@ make test
 
 `db:generate` 在修改 `packages/db/src/postgres/schema.ts` 后执行，并检查生成的 SQL 是否只包含预期变更。所有 migration 位于 `packages/db/drizzle-pg`；禁止手工改表或引入第二套业务数据库。
 
-### 17.3 新增真实模型 adapter
+### 17.3 前端设计系统
+
+Web 控制台使用 `Noto Sans SC` 作为中文界面字体，`Geist Mono` 只用于模型 ID、时间和技术字段。组件必须复用 `globals.css` 中的语义字号、字重与间距 token；新增样式不得直接声明任意 `font-size`、`font-weight` 或 padding 数值。
+
+基础色以黑白为主，操作主色为 `#FEB266`，信息色为 `#3B9AE1`；成功、警告和错误仅用于对应状态，不作装饰。图标统一来自 `react-icons/lu`，不可用 emoji、Unicode 几何字符或纯文本充当交互图标。正文采用中文严格换行和两端对齐，所有交互控件保留可见的键盘焦点状态，并继续满足 320px 响应式验收标准。
+
+设置页提供两套主题：`classic` 保留明亮黑白基础主题；`asuka` 使用 EVA 二号机的高色相对比，大红 `#F4481F` 对荧光绿 `#00E108`，金橙 `#F1934C` 对浅蓝 `#65C8FF`，并以 `#57594F`、`#3C231B` 作为过渡。该主题允许有意降低部分明暗对比，以奶油白和冷白承载正文，同时只在主内容区把语义字重提升两档；侧栏、字号、间距、组件尺寸和 `classic` 字重保持不变。选择保存在浏览器 `localStorage`，不进入 PostgreSQL，也不影响 Agent 或模型运行配置；页面在 React hydration 前恢复主题以减少首屏颜色闪烁。
+
+### 17.4 新增真实模型 adapter
 
 基础 `LlmProvider` 已由 `packages/llm` 实现，业务层必须显式传入 `primary | fast`，不得隐式降级。OpenAI-compatible adapter 返回 `model/latency/token_usage` 审计字段，配置缺失或连接失败只影响当前模型调用，不影响 QQ 入站落库。
 
@@ -915,7 +923,7 @@ interface CognitionAdapter {
 
 每次调用记录 `thought_run_id/sequence/provider/model/prompt_version/input_hash/output_hash/latency/token_usage`，并保存实际 request context、模型可见输出（自然文本或结构化结果）和结构化 source 引用；不要要求或保存隐藏推理。
 
-### 17.4 事务与并发
+### 17.5 事务与并发
 
 MVP 为单用户、低并发。进入 Phase 2 前必须：
 

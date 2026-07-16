@@ -1,6 +1,16 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  LuClock3,
+  LuExternalLink,
+  LuMessageSquareOff,
+  LuMessageSquareReply,
+  LuRefreshCw,
+  LuSave,
+  LuSend,
+  LuShieldCheck,
+} from "react-icons/lu";
 import { controlRequest } from "./control-api";
 import {
   minuteToTime,
@@ -170,7 +180,7 @@ export default function SpeechDecisionsPage({
           <p>查看模型提出的发言动作、硬策略判断与 NapCat 送达结果。模型不能修改这里的安全边界。</p>
         </div>
         <span className={`speech-operating-state ${policy?.enabled && policy.mode === "active" ? "is-active" : ""}`}>
-          <i />{operatingState}
+          <LuShieldCheck aria-hidden />{operatingState}
         </span>
       </header>
 
@@ -207,13 +217,13 @@ export default function SpeechDecisionsPage({
               <label><span>重复抑制（秒）</span><input name="duplicateWindowSeconds" type="number" min="0" max="604800" required defaultValue={policy.duplicate_window_seconds} /></label>
               <label><span>发言时效（秒）</span><input name="freshnessSeconds" type="number" min="60" max="86400" required defaultValue={policy.freshness_seconds} /></label>
             </div>
-            <footer><p>静默开始与结束相同表示不启用静默时段。</p><button className="primary-action" type="submit" disabled={busy === "policy"}>{busy === "policy" ? "保存中…" : "保存策略"}</button></footer>
+            <footer><p>静默开始与结束相同表示不启用静默时段。</p><button className="primary-action" type="submit" disabled={busy === "policy"}><LuSave aria-hidden />{busy === "policy" ? "保存中…" : "保存策略"}</button></footer>
           </form>
 
           <section className="speech-audit" aria-labelledby="speech-audit-title">
-            <header><div><h2 id="speech-audit-title">决策记录</h2><p>每条记录都能回到触发思绪、引用证据和实际送达状态。</p></div><button className="secondary-action" onClick={() => void load()}>刷新</button></header>
+            <header><div><h2 id="speech-audit-title">决策记录</h2><p>每条记录都能回到触发思绪、引用证据和实际送达状态。</p></div><button className="secondary-action" onClick={() => void load()}><LuRefreshCw aria-hidden />刷新</button></header>
             {snapshot.decisions.length === 0 ? (
-              <div className="speech-empty"><h3>还没有发言决策</h3><p>运行一次思绪任务后，fast 模型的动作提案会在这里经过硬策略评估。</p></div>
+              <div className="speech-empty"><LuMessageSquareReply className="empty-icon" aria-hidden /><h3>还没有发言决策</h3><p>运行一次思绪任务后，fast 模型的动作提案会在这里经过硬策略评估。</p></div>
             ) : (
               <div className="speech-audit-grid">
                 <div className="speech-decision-list" aria-label="发言决策列表">
@@ -241,8 +251,11 @@ export default function SpeechDecisionsPage({
                   </dl>
                   {selected.last_error_message && <div className="speech-delivery-error"><strong>{selected.last_error_code}</strong><p>{selected.last_error_message}</p></div>}
                   <section><h4>本轮引用</h4>{selected.evidence_references.length ? <ul className="speech-evidence">{selected.evidence_references.map((reference, index) => <li key={`${evidenceLabel(reference)}-${index}`}><code>{evidenceLabel(reference)}</code></li>)}</ul> : <p className="speech-muted">没有引用；硬策略不会允许真实发送。</p>}</section>
-                  <section className="speech-feedback"><div><h4>你的判断</h4><p>只记录评估标签，不会立即发送、撤回或改写这条消息。</p></div><div>{(["send", "defer", "silent"] as const).map((label) => <button key={label} className={selected.feedback_label === label ? "selected" : ""} aria-pressed={selected.feedback_label === label} disabled={busy?.startsWith("feedback-")} onClick={() => void saveFeedback(selected.id, label)}>{label === "send" ? "应该发送" : label === "defer" ? "应该延后" : "应该沉默"}</button>)}</div></section>
-                  <button className="thought-link" onClick={() => onOpenThought(selected.thought_run_id)}>查看关联思绪 · {selected.thought_run_id}</button>
+                  <section className="speech-feedback"><div><h4>你的判断</h4><p>只记录评估标签，不会立即发送、撤回或改写这条消息。</p></div><div>{(["send", "defer", "silent"] as const).map((label) => {
+                    const FeedbackIcon = label === "send" ? LuSend : label === "defer" ? LuClock3 : LuMessageSquareOff;
+                    return <button key={label} className={selected.feedback_label === label ? "selected" : ""} aria-pressed={selected.feedback_label === label} disabled={busy?.startsWith("feedback-")} onClick={() => void saveFeedback(selected.id, label)}><FeedbackIcon aria-hidden />{label === "send" ? "应该发送" : label === "defer" ? "应该延后" : "应该沉默"}</button>;
+                  })}</div></section>
+                  <button className="thought-link" onClick={() => onOpenThought(selected.thought_run_id)}><LuExternalLink aria-hidden />查看关联思绪 · {selected.thought_run_id}</button>
                 </article>}
               </div>
             )}

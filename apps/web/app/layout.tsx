@@ -1,10 +1,12 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist_Mono, Noto_Sans_SC } from "next/font/google";
+import { colorThemeBootstrapScript } from "@/app/components/theme-preferences";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
+const notoSansSc = Noto_Sans_SC({
+  variable: "--font-noto-sans-sc",
+  display: "swap",
+  preload: false,
 });
 
 const geistMono = Geist_Mono({
@@ -27,9 +29,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: colorThemeBootstrapScript }} />
+      </head>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${notoSansSc.variable} ${geistMono.variable} antialiased`}
       >
         {children}
       </body>

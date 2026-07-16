@@ -1,6 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  LuCalendarClock,
+  LuCircle,
+  LuEye,
+  LuPlay,
+} from "react-icons/lu";
 import { controlRequest } from "./control-api";
 import { canManuallyRunJob, formatJobMetrics } from "./jobs-view";
 
@@ -237,7 +243,7 @@ export default function JobsPage() {
   return (
     <section className="page-panel jobs-page">
       <div className="page-hero">
-        <div><span className="section-kicker">Scheduler control plane</span><h1>定时触发任务</h1><p>认知任务从 PostgreSQL 增量证据开始，经租约、结构化模型输出和确定性归因校验后推进 watermark。失败不会阻塞 QQ 入站。</p></div>
+        <div><span className="page-context">Scheduler control plane</span><h1>定时触发任务</h1><p>认知任务从 PostgreSQL 增量证据开始，经租约、结构化模型输出和确定性归因校验后推进 watermark。失败不会阻塞 QQ 入站。</p></div>
         <div className="dual-stat"><span><strong>{activeCount}</strong>已启用</span><i /><span><strong>{jobs.length - activeCount}</strong>规划或停用</span></div>
       </div>
 
@@ -251,7 +257,7 @@ export default function JobsPage() {
           <i /><i /><i />
         </div>
       ) : jobs.length === 0 ? (
-        <div className="jobs-empty"><h2>还没有登记任务</h2><p>先应用 PostgreSQL migration，再刷新此页面。</p></div>
+        <div className="jobs-empty"><LuCalendarClock className="empty-icon" aria-hidden /><h2>还没有登记任务</h2><p>先应用 PostgreSQL migration，再刷新此页面。</p></div>
       ) : (
         <div className="jobs-workspace">
           <div className="job-list" aria-label="任务列表">
@@ -265,7 +271,7 @@ export default function JobsPage() {
                     aria-pressed={selected}
                     onClick={() => setSelectedJobId(job.id)}
                   >
-                    <span className={`job-status ${job.status}`}><i />{job.status === "active" ? "已启用" : job.status === "disabled" ? "已停用" : "规划中"}</span>
+                    <span className={`job-status ${job.status}`}><LuCircle aria-hidden />{job.status === "active" ? "已启用" : job.status === "disabled" ? "已停用" : "规划中"}</span>
                     <span className="job-row-copy"><strong>{job.name}</strong><small>{job.description}</small></span>
                     <span className="job-schedule"><code>{job.schedule_expression}</code><small>{scheduleTypeLabel[job.schedule_type] ?? job.schedule_type}</small></span>
                   </button>
@@ -278,10 +284,10 @@ export default function JobsPage() {
                   <footer>
                     <span>{job.configurable ? "配置入口尚未开放" : "系统托管计划"} · {job.timezone}</span>
                     <div>
-                      <button className="ghost-button" type="button" onClick={() => setSelectedJobId(job.id)}>查看 runs</button>
+                      <button className="ghost-button" type="button" onClick={() => setSelectedJobId(job.id)}><LuEye aria-hidden />查看 runs</button>
                       {canManuallyRunJob(job) && (
                         <button className="primary-button" type="button" disabled={busyJobId === job.id} onClick={() => void trigger(job)}>
-                          {busyJobId === job.id ? "入队中…" : "立即运行"}
+                          <LuPlay aria-hidden />{busyJobId === job.id ? "入队中…" : "立即运行"}
                         </button>
                       )}
                     </div>
@@ -306,7 +312,7 @@ export default function JobsPage() {
                 <div className="run-tabs" role="list" aria-label="最近运行">
                   {runs.slice(0, 8).map((run) => (
                     <button type="button" role="listitem" className={run.id === selectedRunId ? "selected" : ""} key={run.id} onClick={() => setSelectedRunId(run.id)}>
-                      <span className={`run-dot state-${run.status}`} />
+                      <LuCircle className={`run-dot state-${run.status}`} aria-hidden />
                       <span><strong>{runStatusLabel[run.status] ?? run.status}</strong><small>{formatDateTime(run.created_at)}</small></span>
                       <code>#{run.id.slice(0, 6)}</code>
                     </button>
