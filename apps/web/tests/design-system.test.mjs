@@ -91,3 +91,15 @@ test("the Asuka theme uses EVA hue pairs and scopes heavier type to content", as
   assert.match(css, /:root\[data-color-theme="asuka"\] \.mobile-nav\s*{[^}]*--weight-regular: 400;[^}]*--weight-bold: 700;/s);
   assert.match(css, /:root\[data-color-theme="asuka"\] ::selection\s*{[^}]*background: var\(--accent-strong\);[^}]*color: var\(--warning\);/s);
 });
+
+test("thought audit badge tones cannot collide with Tailwind utility classes", async () => {
+  const [component, css] = await Promise.all([
+    readFile(new URL("components/thought-runs-page.tsx", appRoot), "utf8"),
+    readFile(new URL("globals.css", appRoot), "utf8"),
+  ]);
+
+  assert.match(component, /audit-badge audit-badge-tone-\$\{tone\}/);
+  assert.doesNotMatch(component, /audit-badge \$\{tone\}/);
+  assert.match(css, /\.audit-badge-tone-fixed\s*{/);
+  assert.doesNotMatch(css, /\.audit-badge\.fixed\s*{/);
+});

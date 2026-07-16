@@ -1412,27 +1412,27 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.audit-badge.persisted {
+.audit-badge-tone-persisted {
   background: var(--success-soft);
   color: var(--success);
 }
 
-.audit-badge.execution {
+.audit-badge-tone-execution {
   background: var(--surface-muted);
   color: var(--muted);
 }
 
-.audit-badge.current {
+.audit-badge-tone-current {
   background: var(--info-soft);
   color: var(--info);
 }
 
-.audit-badge.failure {
+.audit-badge-tone-failure {
   background: var(--danger-soft);
   color: var(--danger);
 }
 
-.audit-badge.fixed {
+.audit-badge-tone-fixed {
   background: var(--accent-soft);
   color: var(--accent-strong);
 }

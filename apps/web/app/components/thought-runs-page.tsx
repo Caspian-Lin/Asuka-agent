@@ -290,7 +290,7 @@ function AuditBadge({
   tone: "persisted" | "execution" | "current" | "failure" | "fixed";
   children: ReactNode;
 }) {
-  return <span className={`audit-badge ${tone}`}>{children}</span>;
+  return <span className={`audit-badge audit-badge-tone-${tone}`}>{children}</span>;
 }
 
 function CallStats({ call }: { call: Pick<
