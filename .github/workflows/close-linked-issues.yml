@@ -1,0 +1,122 @@
+name: Close linked issues
+
+on:
+  pull_request:
+    types:
+      - closed
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  close-linked-issues:
+    name: close-linked-issues
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close issues referenced by the merged PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pullRequest = context.payload.pull_request;
+            const markdown = pullRequest.body ?? "";
+            const issueNumbers = new Set();
+            let fence = null;
+
+            for (const line of markdown.split(/\r?\n/u)) {
+              const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/u);
+
+              if (fenceMatch) {
+                const marker = fenceMatch[1];
+
+                if (fence === null) {
+                  fence = { character: marker[0], length: marker.length };
+                } else if (
+                  marker[0] === fence.character &&
+                  marker.length >= fence.length
+                ) {
+                  fence = null;
+                }
+
+                continue;
+              }
+
+              if (fence !== null) {
+                continue;
+              }
+
+              const closingLine = line.match(
+                /^\s*(?:[-*+]\s+)?(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s+(?<references>#[1-9]\d*(?:\s*(?:,|and)\s*#[1-9]\d*)*)\s*[.!]?\s*$/iu,
+              );
+
+              if (!closingLine?.groups?.references) {
+                continue;
+              }
+
+              for (const reference of closingLine.groups.references.matchAll(
+                /#([1-9]\d*)/gu,
+              )) {
+                issueNumbers.add(Number(reference[1]));
+              }
+            }
+
+            if (issueNumbers.size === 0) {
+              core.info("No standalone closing references found in the PR body.");
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const pullNumber = pullRequest.number;
+            const baseRef = pullRequest.base.ref;
+
+            for (const issueNumber of issueNumbers) {
+              let issue;
+
+              try {
+                const response = await github.rest.issues.get({
+                  owner,
+                  repo,
+                  issue_number: issueNumber,
+                });
+                issue = response.data;
+              } catch (error) {
+                if (error.status === 404) {
+                  core.info(`Skipping missing issue #${issueNumber}.`);
+                  continue;
+                }
+
+                throw error;
+              }
+
+              if (issue.pull_request) {
+                core.info(`Skipping #${issueNumber} because it is a pull request.`);
+                continue;
+              }
+
+              if (issue.state === "closed") {
+                core.info(`Skipping already closed issue #${issueNumber}.`);
+                continue;
+              }
+
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                state: "closed",
+                state_reason: "completed",
+              });
+
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                body: `Closed automatically after PR #${pullNumber} was merged into \`${baseRef}\`.`,
+              });
+
+              core.info(
+                `Closed issue #${issueNumber} from PR #${pullNumber} merged into ${baseRef}.`,
+              );
+            }

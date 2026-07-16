@@ -30,7 +30,9 @@ Tests use Node's built-in runner and follow `<workspace>/tests/*.test.mjs`. Add 
 
 ## Standard Development Workflow
 
-Create the issue and milestone first with `gh issue create` and `gh api`. When creating an issue, add the most relevant existing labels; if none fit, confirm before creating a new label. Start standalone `feature/<issue>-<slug>` or `milestone/<slug>` branches from an updated `dev`. For milestone work, branch features from the milestone branch and open PRs back to that branch; standalone features target `dev`. After implementation, push and open a PR. Wait for all CI checks, then wait for the repository owner's explicit confirmation before merging.
+Create the issue and milestone first with `gh issue create` and `gh api`. When creating an issue, add the most relevant existing labels; if none fit, confirm before creating a new label. Start standalone `feature/<issue>-<slug>` or `milestone/<slug>` branches from an updated `dev`. For milestone work, branch features from the milestone branch and open PRs back to that branch; standalone features target `dev`. After implementation, push and open a PR.
+
+Every PR must pass the required `lint`, `typecheck`, `boundaries`, `db-check`, `test`, and `build` CI jobs. Do not bypass or disable required checks to merge. After all CI checks are green, wait for the repository owner's explicit confirmation before merging; never merge your own PR without that approval.
 
 Run GitHub-facing `gh` operations outside the sandbox with elevated network access, including authentication checks, API calls, issue/PR operations, and CI checks. A sandboxed `gh auth status` may incorrectly report an invalid token; do not treat that result as the real authentication state.
 
