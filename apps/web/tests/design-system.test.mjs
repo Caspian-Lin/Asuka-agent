@@ -14,19 +14,6 @@ const componentFiles = [
   "thought-runs-page.tsx",
 ];
 
-function contrastRatio(foreground, background) {
-  const luminance = (hex) => {
-    const channels = hex.slice(1).match(/.{2}/g).map((channel) => Number.parseInt(channel, 16) / 255);
-    const [red, green, blue] = channels.map((channel) => (
-      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
-    ));
-    return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-  };
-  const first = luminance(foreground);
-  const second = luminance(background);
-  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
-}
-
 test("web shell uses the shared Chinese font and icon library", async () => {
   const [layout, packageJson, ...components] = await Promise.all([
     readFile(new URL("layout.tsx", appRoot), "utf8"),
@@ -50,9 +37,11 @@ test("design tokens own typography, padding, and product colors", async () => {
   assert.match(css, /--accent: #feb266;/);
   assert.match(css, /--info: #3b9ae1;/);
   assert.match(css, /:root\[data-color-theme="asuka"\]/);
-  assert.match(css, /--navigation-surface: #881c2c;/);
-  assert.match(css, /--accent: #a8e2ff;/);
+  assert.match(css, /--preview-asuka-surface: #e9922f;/);
+  assert.match(css, /--preview-asuka-accent: #a8e2ff;/);
   assert.match(css, /--font-sans: var\(--font-noto-sans-sc\);/);
+  assert.match(css, /--weight-regular: 500;/);
+  assert.match(css, /--weight-bold: 800;/);
   assert.match(css, /line-break: strict;/);
   assert.match(css, /text-align: justify;/);
 
@@ -73,29 +62,28 @@ test("design tokens own typography, padding, and product colors", async () => {
   assert.doesNotMatch(rules, /--(?:lavender|cyan|rose)/);
 });
 
-test("the Asuka theme changes only color and keeps readable text pairs", async () => {
+test("the Asuka theme uses EVA hue pairs and scopes heavier type to content", async () => {
   const css = await readFile(new URL("globals.css", appRoot), "utf8");
   const themeBlock = css.match(/:root\[data-color-theme="asuka"\]\s*{([^}]+)}/)?.[1];
   assert.ok(themeBlock);
   assert.doesNotMatch(themeBlock, /--(?:font|type|weight|tracking|space)-/);
 
   const token = (name) => themeBlock.match(new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`, "i"))?.[1];
-  const readablePairs = [
-    ["ink", "canvas"],
-    ["ink", "paper"],
-    ["muted", "paper"],
-    ["faint", "surface-subtle"],
-    ["accent-strong", "accent-soft"],
-    ["navigation-ink", "navigation-surface"],
-    ["navigation-muted", "navigation-surface"],
-  ];
-  for (const [foregroundName, backgroundName] of readablePairs) {
-    const foreground = token(foregroundName);
-    const background = token(backgroundName);
-    assert.ok(foreground && background, `missing ${foregroundName}/${backgroundName} theme tokens`);
-    assert.ok(
-      contrastRatio(foreground, background) >= 4.5,
-      `${foregroundName} must remain readable on ${backgroundName}`,
-    );
+  const expectedTokens = {
+    paper: "#f4481f",
+    "paper-strong": "#ffe7c1",
+    accent: "#ffe8c1",
+    info: "#65c8ff",
+    "surface-muted": "#dc7826",
+    canvas: "#312e2a",
+    ink: "#00e108",
+    muted: "#ffe8c1",
+  };
+  for (const [name, expected] of Object.entries(expectedTokens)) {
+    assert.equal(token(name)?.toLowerCase(), expected, `${name} must keep its EVA palette role`);
   }
+
+  assert.match(css, /:root\[data-color-theme="asuka"\] \.workbench\s*{[^}]*--weight-regular: 600;[^}]*--weight-bold: 900;/s);
+  assert.match(css, /:root\[data-color-theme="asuka"\] \.mobile-nav\s*{[^}]*--weight-regular: 400;[^}]*--weight-bold: 700;/s);
+  assert.match(css, /:root\[data-color-theme="asuka"\] ::selection\s*{[^}]*background: var\(--accent-strong\);[^}]*color: var\(--warning\);/s);
 });

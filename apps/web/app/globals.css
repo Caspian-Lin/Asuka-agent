@@ -57,10 +57,10 @@
   --type-secondary-h3: 0.875rem;
   --type-secondary-body: 0.75rem;
   --type-hidden: 0;
-  --weight-regular: 400;
-  --weight-medium: 500;
-  --weight-semibold: 600;
-  --weight-bold: 700;
+  --weight-regular: 500;
+  --weight-medium: 600;
+  --weight-semibold: 700;
+  --weight-bold: 800;
   --tracking-normal: 0;
   --tracking-heading: -0.02em;
   --tracking-tight: -0.03em;
@@ -78,40 +78,56 @@
 }
 
 :root[data-color-theme="asuka"] {
-  --canvas: #e9922f;
-  --paper: #ffc45f;
-  --paper-strong: #ffd986;
-  --surface-subtle: #f4ac45;
+  --canvas: #312e2a;
+  --paper: #F4481F;
+  --paper-strong: #FFE7C1;
+  --surface-subtle: #E8612D;
   --surface-muted: #dc7826;
-  --ink: #24100d;
-  --muted: #52231d;
-  --faint: #58251f;
-  --line: #bd572d;
-  --line-strong: #8e2637;
-  --accent: #a8e2ff;
-  --accent-strong: #085b8e;
-  --accent-soft: #cbeeff;
-  --accent-wash: #e2f5ff;
+  --ink: #00e108;
+  --muted: #FFE8C1;
+  --faint: #ffce8a;
+  --line: #470202;
+  --line-strong: #006603;
+  --accent: #FFE8C1;
+  --accent-strong: #01df40;
+  --accent-soft: #F1934C;
+  --accent-wash: #F1934C;
   --info: #65c8ff;
-  --info-strong: #075b8b;
-  --info-soft: #c5ebff;
+  --info-strong: #168b07;
+  --info-soft: #003958;
   --danger: #8b1727;
   --danger-soft: #ffd3c4;
-  --success: #185e3d;
-  --success-soft: #bfe4c8;
-  --warning: #7a3d00;
-  --warning-soft: #ffd893;
+  --success: #ade2ff;
+  --success-soft: #4CA5C3;
+  --warning: #70007a;
+  --warning-soft: #d793ff;
   --inverse: #fff7ea;
   --code-surface: #621424;
   --focus-ring: rgba(168, 226, 255, 0.5);
   --info-ring: rgba(101, 200, 255, 0.3);
   --success-ring: rgba(24, 94, 61, 0.2);
   --neutral-shadow: rgba(74, 16, 13, 0.2);
-  --navigation-surface: #881c2c;
-  --navigation-panel: #ffc45f;
-  --navigation-ink: #fff7ea;
-  --navigation-muted: #ffd6be;
+  --navigation-surface: #F5471F;
+  --navigation-panel: #F1934C;
+  --navigation-ink: #00e108;
+  --navigation-muted: #FFE8C1;
   --navigation-line: #b94b52;
+}
+
+:root[data-color-theme="asuka"] .workbench {
+  --weight-regular: 600;
+  --weight-medium: 700;
+  --weight-semibold: 800;
+  --weight-bold: 900;
+  font-weight: var(--weight-regular);
+}
+
+:root[data-color-theme="asuka"] .mobile-nav {
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  font-weight: var(--weight-regular);
 }
 
 @theme inline {
@@ -186,6 +202,11 @@ textarea:focus-visible {
 
 ::selection {
   background: var(--accent-soft);
+}
+
+:root[data-color-theme="asuka"] ::selection {
+  background: #00ffee;
+  color: #ff7409;
 }
 
 .agent-shell {

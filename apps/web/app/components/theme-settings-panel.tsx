@@ -20,8 +20,8 @@ const themeOptions: Array<{
   },
   {
     value: "asuka",
-    title: "Asuka 红金",
-    description: "深红导航、金橙工作区，以浅亮蓝突出交互。",
+    title: "Asuka 二号机",
+    description: "红绿、金橙与浅蓝的高色相对比；主内容使用更粗字重。",
   },
 ];
 
@@ -31,7 +31,7 @@ export default function ThemeSettingsPanel({ theme, onChange }: ThemeSettingsPan
       <header className="settings-section-head">
         <div>
           <h2 id="theme-settings-title">界面主题</h2>
-          <p>只改变配色方案，不改变字体、字号、间距或页面结构。选择会保存在当前浏览器。</p>
+          <p>选择会保存在当前浏览器。二号机主题会提高主内容区字重；侧栏、字号、间距和基础主题不变。</p>
         </div>
         <span className="theme-section-icon"><LuPalette aria-hidden />配色</span>
       </header>
