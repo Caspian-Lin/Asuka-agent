@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildResetConfig,
+  buildSudoResetCommands,
   quotePostgresIdentifier,
   resetDatabase,
   validateResetPrivileges,
@@ -167,7 +168,7 @@ test("database reset validates create, owner, and drop privileges", () => {
   ));
 });
 
-test("database reset checks create privileges before dropping the target", async () => {
+test("database reset falls back to sudo before any direct drop", async () => {
   const statements = [];
   const maintenanceClient = {
     async unsafe(statement) {
@@ -188,26 +189,81 @@ test("database reset checks create privileges before dropping the target", async
     },
   };
 
-  await assert.rejects(
-    () => resetDatabase(
+  const targetClient = {
+    async end() {
+      statements.push("target-end");
+    },
+  };
+  let clientCount = 0;
+
+  await resetDatabase(
       {
         confirmation: "asuka_agent",
         databaseUrl: "postgres://asuka_agent:app@localhost/asuka_agent",
       },
       {
         createClient() {
-          return maintenanceClient;
+          clientCount += 1;
+          return clientCount === 1 ? maintenanceClient : targetClient;
         },
+        log() {},
         async runMigrations() {
-          throw new Error("Migrations must not run without create privileges.");
+          statements.push("migrate");
+        },
+        async runSudoReset(config) {
+          statements.push(`sudo-reset:${config.databaseName}`);
         },
       },
-    ),
-    /cannot create databases/,
   );
 
   assert.equal(statements.some((statement) => statement.startsWith("DROP DATABASE")), false);
-  assert.deepEqual(statements.at(-1), "end");
+  assert.deepEqual(statements.slice(-4), [
+    "end",
+    "sudo-reset:asuka_agent",
+    "migrate",
+    "target-end",
+  ]);
+});
+
+test("sudo fallback passes database names as isolated command arguments", () => {
+  const config = buildResetConfig(
+    "postgres://asuka_agent:app@localhost:5433/asuka_agent",
+    "asuka_agent",
+  );
+  const commands = buildSudoResetCommands(config);
+
+  assert.deepEqual(commands, [
+    {
+      command: "sudo",
+      args: [
+        "-u",
+        "postgres",
+        "--",
+        "dropdb",
+        "--if-exists",
+        "--force",
+        "--maintenance-db=postgres",
+        "--port=5433",
+        "--",
+        "asuka_agent",
+      ],
+    },
+    {
+      command: "sudo",
+      args: [
+        "-u",
+        "postgres",
+        "--",
+        "createdb",
+        "--owner=asuka_agent",
+        "--template=template0",
+        "--maintenance-db=postgres",
+        "--port=5433",
+        "--",
+        "asuka_agent",
+      ],
+    },
+  ]);
 });
 
 test("PostgreSQL identifiers are quoted without allowing statement injection", () => {

@@ -74,7 +74,7 @@ db-migrate: check-env ## 将已审阅的 PostgreSQL migration 应用到数据库
 
 migrate: db-migrate ## db-migrate 的简写
 
-db-reset: check-env ## 永久删除本地数据库、重建并应用全部 migration（需 CONFIRM_DATABASE_RESET=库名）
+db-reset: check-env ## 永久删除本地数据库并重建（需确认库名，可能请求 sudo）
 	CONFIRM_DATABASE_RESET="$(CONFIRM_DATABASE_RESET)" $(NPM) run db:reset
 
 napcat-url: check-env ## 显示 Agent 将连接的 NapCat WS 地址

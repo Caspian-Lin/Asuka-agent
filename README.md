@@ -63,7 +63,7 @@ make check        # ESLint + typecheck + workspace 边界 + 单元测试
 make test         # 构建 + 完整测试
 ```
 
-`db-reset` 仅用于丢弃本机开发数据。执行前先停止 gateway、control API 和 worker，并确认 `.env` 的 `DATABASE_URL` 指向预期数据库；命令只接受 loopback PostgreSQL，拒绝维护库和模板库，且确认值必须与 URL 中的数据库名完全一致。应用角色没有 `CREATEDB`（推荐配置）时，还需临时在 `.env` 设置指向同一本机端口和 `postgres` 维护库的 `DATABASE_ADMIN_URL`；脚本会先验证管理员能够重建以应用角色为 owner 的数据库，再删除目标库。它会从 `template0` 新建空库并应用当前完整 migration chain，无法恢复原有数据；完成后应从 `.env` 删除管理员连接。
+`db-reset` 仅用于丢弃本机开发数据。执行前先停止 gateway、control API 和 worker，并确认 `.env` 的 `DATABASE_URL` 指向预期数据库；命令只接受 loopback PostgreSQL，拒绝维护库和模板库，且确认值必须与 URL 中的数据库名完全一致。应用角色没有 `CREATEDB`（推荐配置）时，本机原生 PostgreSQL 会通过 `sudo -u postgres` 请求系统密码；容器或没有本地 sudo 的环境可临时在 `.env` 设置同机同端口、连接 `postgres` 维护库的 `DATABASE_ADMIN_URL`。脚本会先验证目标 owner，再删除数据库，以应用角色为 owner 从 `template0` 新建空库并应用当前完整 migration chain。操作无法恢复；管理员连接使用后应立即从 `.env` 删除。
 
 ## 主要目录
 

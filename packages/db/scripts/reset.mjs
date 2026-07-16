@@ -1,4 +1,5 @@
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -7,6 +8,8 @@ import postgres from "postgres";
 
 const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const reservedDatabaseNames = new Set(["postgres", "template0", "template1"]);
+
+class ResetPrivilegesError extends Error {}
 
 function parseDatabaseUrl(databaseUrl, variableName) {
   if (!databaseUrl || databaseUrl.includes("CHANGE_ME")) {
@@ -147,13 +150,13 @@ export function validateResetPrivileges(
 
   if (!role || (!role.rolsuper && !role.rolcreatedb)) {
     const roleName = role?.current_user ?? "configured reset role";
-    throw new Error(
+    throw new ResetPrivilegesError(
       `PostgreSQL role "${roleName}" cannot create databases. Set DATABASE_ADMIN_URL to a loopback PostgreSQL superuser URL ending in /postgres, then rerun.`,
     );
   }
 
   if (!role.rolsuper && role.current_user !== targetDatabaseOwner) {
-    throw new Error(
+    throw new ResetPrivilegesError(
       `PostgreSQL role "${role.current_user}" must be a superuser to create a database owned by "${targetDatabaseOwner}".`,
     );
   }
@@ -163,13 +166,13 @@ export function validateResetPrivileges(
     !role.rolsuper &&
     role.current_user !== existingDatabaseOwner
   ) {
-    throw new Error(
+    throw new ResetPrivilegesError(
       `PostgreSQL role "${role.current_user}" cannot drop database owned by "${existingDatabaseOwner}".`,
     );
   }
 }
 
-async function assertResetPrivileges(client, config) {
+async function readResetPrivileges(client, config) {
   const [role] = await client.unsafe(
     "select current_user, rolcreatedb, rolsuper from pg_roles where rolname = current_user",
   );
@@ -182,18 +185,85 @@ async function assertResetPrivileges(client, config) {
     [config.databaseOwner],
   );
 
-  validateResetPrivileges(
+  return {
+    existingDatabaseOwner: database?.owner_name,
     role,
-    database?.owner_name,
-    config.databaseOwner,
-    targetOwner?.owner_exists,
-  );
+    targetOwnerExists: targetOwner?.owner_exists,
+  };
 }
 
 async function applyMigrations(client) {
   await migrate(drizzle(client), {
     migrationsFolder: fileURLToPath(new URL("../drizzle-pg", import.meta.url)),
   });
+}
+
+function runInteractiveCommand(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      const status = signal ? `signal ${signal}` : `status ${code}`;
+      reject(new Error(`${command} exited with ${status}.`));
+    });
+  });
+}
+
+export function buildSudoResetCommands(config) {
+  const targetUrl = new URL(config.targetUrl);
+  const port = targetUrl.port || "5432";
+  const sudoPrefix = ["-u", "postgres", "--"];
+
+  return [
+    {
+      args: [
+        ...sudoPrefix,
+        "dropdb",
+        "--if-exists",
+        "--force",
+        "--maintenance-db=postgres",
+        `--port=${port}`,
+        "--",
+        config.databaseName,
+      ],
+      command: "sudo",
+    },
+    {
+      args: [
+        ...sudoPrefix,
+        "createdb",
+        `--owner=${config.databaseOwner}`,
+        "--template=template0",
+        "--maintenance-db=postgres",
+        `--port=${port}`,
+        "--",
+        config.databaseName,
+      ],
+      command: "sudo",
+    },
+  ];
+}
+
+async function resetDatabaseWithSudo(config) {
+  console.warn(
+    `Application role cannot rebuild ${config.targetLabel}; requesting local sudo for PostgreSQL role postgres.`,
+  );
+
+  for (const { command, args } of buildSudoResetCommands(config)) {
+    try {
+      await runInteractiveCommand(command, args);
+    } catch (cause) {
+      throw new Error(
+        "Local sudo database reset failed. Configure DATABASE_ADMIN_URL for a loopback PostgreSQL superuser and rerun.",
+        { cause },
+      );
+    }
+  }
 }
 
 export async function resetDatabase({
@@ -203,7 +273,9 @@ export async function resetDatabase({
   requireSsl = process.env.DATABASE_SSL === "true",
 } = {}, {
   createClient = postgres,
+  log = console.log,
   runMigrations = applyMigrations,
+  runSudoReset = resetDatabaseWithSudo,
 } = {}) {
   const config = buildResetConfig(databaseUrl, confirmation, adminDatabaseUrl);
   const postgresOptions = {
@@ -211,21 +283,42 @@ export async function resetDatabase({
     max: 1,
   };
 
+  let requiresSudoReset = false;
   const maintenanceClient = createClient(config.maintenanceUrl, postgresOptions);
   try {
-    await assertResetPrivileges(maintenanceClient, config);
-    console.warn(`Permanently resetting local PostgreSQL database ${config.targetLabel}.`);
+    const privileges = await readResetPrivileges(maintenanceClient, config);
+    try {
+      validateResetPrivileges(
+        privileges.role,
+        privileges.existingDatabaseOwner,
+        config.databaseOwner,
+        privileges.targetOwnerExists,
+      );
+    } catch (error) {
+      if (adminDatabaseUrl || !(error instanceof ResetPrivilegesError)) {
+        throw error;
+      }
+      requiresSudoReset = true;
+    }
 
-    const quotedDatabaseName = quotePostgresIdentifier(config.databaseName);
-    const quotedDatabaseOwner = quotePostgresIdentifier(config.databaseOwner);
-    await maintenanceClient.unsafe(
-      `DROP DATABASE IF EXISTS ${quotedDatabaseName} WITH (FORCE)`,
-    );
-    await maintenanceClient.unsafe(
-      `CREATE DATABASE ${quotedDatabaseName} OWNER ${quotedDatabaseOwner} TEMPLATE template0`,
-    );
+    if (!requiresSudoReset) {
+      console.warn(`Permanently resetting local PostgreSQL database ${config.targetLabel}.`);
+
+      const quotedDatabaseName = quotePostgresIdentifier(config.databaseName);
+      const quotedDatabaseOwner = quotePostgresIdentifier(config.databaseOwner);
+      await maintenanceClient.unsafe(
+        `DROP DATABASE IF EXISTS ${quotedDatabaseName} WITH (FORCE)`,
+      );
+      await maintenanceClient.unsafe(
+        `CREATE DATABASE ${quotedDatabaseName} OWNER ${quotedDatabaseOwner} TEMPLATE template0`,
+      );
+    }
   } finally {
     await maintenanceClient.end();
+  }
+
+  if (requiresSudoReset) {
+    await runSudoReset(config);
   }
 
   const targetClient = createClient(config.targetUrl, postgresOptions);
@@ -235,7 +328,7 @@ export async function resetDatabase({
     await targetClient.end();
   }
 
-  console.log(`Local PostgreSQL database ${config.targetLabel} rebuilt from migrations.`);
+  log(`Local PostgreSQL database ${config.targetLabel} rebuilt from migrations.`);
 }
 
 const isMainModule =
