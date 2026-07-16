@@ -103,7 +103,10 @@ test("primary loop appends auditable tool results before continuation", async ()
   let toolCalls = 0;
   let continuationMessages;
   const result = await runPrimaryToolLoop({
-    initialMessages: [{ role: "user", content: "查找露营" }],
+    initialMessages: [
+      { role: "system", content: "You are Asuka. Stable prompt." },
+      { role: "user", content: "查找露营" },
+    ],
     limits: { maxRounds: 3, maxTokens: 1_000, maxToolCalls: 3, maxActiveMs: 5_000 },
     readUsage: async () => ({ rounds, tokens: 0, toolCalls }),
     invokeModel: async ({ messages, purpose }) => {
@@ -143,6 +146,10 @@ test("primary loop appends auditable tool results before continuation", async ()
     },
   });
   assert.equal(result.callsCreated, 2);
+  assert.equal(
+    continuationMessages.filter((message) => message.role === "system").length,
+    1,
+  );
   assert.equal(continuationMessages.at(-2).role, "assistant");
   assert.equal(continuationMessages.at(-1).role, "tool");
 });

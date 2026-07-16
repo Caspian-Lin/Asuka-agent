@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   collectContextSections,
+  describeSystemInstruction,
   describeToolArguments,
   groupThoughtRuns,
+  thoughtCallStageLabel,
 } from "../app/components/thought-runs-view.ts";
 
 test("thought runs stay grouped by conversation in latest-seen order", () => {
@@ -49,4 +51,39 @@ test("tool calls describe intent without exposing raw message IDs", () => {
     "search_conversation_messages",
     JSON.stringify({ query: "露营", limit: 5 }),
   ), "“露营” · 最多 5 条");
+});
+
+test("system instructions are labeled by responsibility instead of sharing one generic label", () => {
+  assert.equal(
+    describeSystemInstruction("You are Asuka. Use evidence.").label,
+    "Agent 行为指令",
+  );
+  assert.equal(
+    describeSystemInstruction("You are a deterministic action compiler.").label,
+    "动作编译指令",
+  );
+  assert.equal(
+    describeSystemInstruction("Return only one valid JSON object.\nJSON Schema: {}").label,
+    "输出格式约束",
+  );
+});
+
+test("current run calls describe their stage instead of labeling every output as natural thought", () => {
+  assert.equal(thoughtCallStageLabel({
+    purpose: "primary",
+    response_json: { toolCalls: [{}] },
+  }), "请求补充资料");
+  assert.equal(thoughtCallStageLabel({
+    purpose: "tool_continuation",
+    response_json: { content: "形成结论" },
+  }), "工具后形成本次 Thought");
+  assert.equal(thoughtCallStageLabel({
+    purpose: "compiler",
+    response_json: { content: "{}" },
+  }), "编译动作候选");
+  assert.equal(thoughtCallStageLabel({
+    purpose: "primary",
+    status: "failed",
+    error_code: "timeout",
+  }), "主模型调用失败");
 });

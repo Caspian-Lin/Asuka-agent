@@ -76,6 +76,8 @@ sent_at / conversation_type(group|private) / content
 
 动态时间、参与者快照、召回结果和本轮消息不得写入稳定 system prompt。相同前缀应保持字节级稳定以提高 provider KV/context cache 命中率，但缓存只是性能优化，不能成为正确性依赖。
 
+Chat completion 调用本身无状态，因此每次独立请求都必须重新携带该次调用需要的 system 指令一次；工具续轮复用原请求中的稳定指令，不得逐轮追加副本。DashScope 的 structured output 适配会为 compiler 额外加入一条 JSON 输出格式约束，它与动作编译行为指令职责不同，不代表 Agent system prompt 重复。
+
 ### 上下文预算
 
 以设置页 `context_window` 和模型真实上限的较小值计算 soft limit，并预留主模型输出、工具结果与异常增长空间：

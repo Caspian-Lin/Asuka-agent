@@ -18,8 +18,10 @@ import {
 import { controlRequest } from "./control-api";
 import {
   collectContextSections,
+  describeSystemInstruction,
   describeToolArguments,
   groupThoughtRuns,
+  thoughtCallStageLabel,
   toolLabel,
   type ThoughtContextItem,
   type ThoughtContextSectionKey,
@@ -193,19 +195,12 @@ function stateLabel(value: string) {
   return value;
 }
 
-function purposeLabel(value: string) {
-  if (value === "primary") return "自然思绪";
-  if (value === "tool_continuation") return "读取资料后继续思考";
-  if (value === "revision") return "按校验结果修订";
-  if (value === "compiler") return "动作编译";
-  if (value === "compression") return "上下文压缩";
-  return value;
-}
-
-function roleLabel(value: string) {
-  if (value === "system") return "系统提示";
-  if (value === "assistant") return "Asuka / 模型";
-  if (value === "tool") return "工具结果";
+function roleLabel(message: ChatMessage) {
+  if (message.role === "system") {
+    return describeSystemInstruction(message.content ?? "").label;
+  }
+  if (message.role === "assistant") return "Asuka / 模型";
+  if (message.role === "tool") return "工具结果";
   return "会话输入";
 }
 
@@ -217,7 +212,7 @@ function contextItemTitle(item: ThoughtContextItem) {
   }
   if (item.itemType === "thought_turn") {
     const turn = Number(item.metadata?.turnOrdinal);
-    return Number.isFinite(turn) ? `第 ${turn} 轮思绪` : "前一轮思绪";
+    return Number.isFinite(turn) ? `历史 Thought · 第 ${turn} 轮` : "历史 Thought";
   }
   return item.title;
 }
@@ -276,7 +271,7 @@ function NaturalOutput({ call }: { call: LlmCall }) {
   const content = call.response_json?.content?.trim();
   const natural = ["primary", "tool_continuation", "revision"].includes(call.purpose);
   if (natural && content) {
-    return <div className="natural-thought-output"><span>本轮思绪</span><p>{content}</p></div>;
+    return <div className="natural-thought-output"><span>本次调用生成内容</span><p>{content}</p></div>;
   }
   if (call.error_code) {
     return <p className="tool-result-error">调用失败：{call.error_code}</p>;
@@ -384,7 +379,7 @@ export default function ThoughtRunsPage({
     () => detail ? collectContextSections(detail.calls) : [],
     [detail],
   );
-  const systemPrompts = useMemo(() => {
+  const systemInstructions = useMemo(() => {
     const seen = new Set<string>();
     return (detail?.calls ?? []).flatMap((call) => call.request_context)
       .filter((message) => message.role === "system" && message.content)
@@ -392,7 +387,7 @@ export default function ThoughtRunsPage({
         const content = String(message.content);
         if (seen.has(content)) return [];
         seen.add(content);
-        return [content];
+        return [{ content, ...describeSystemInstruction(content) }];
       });
   }, [detail]);
 
@@ -487,45 +482,55 @@ export default function ThoughtRunsPage({
                   </div>
                 </header>
                 <div className="thought-inspector-body">
-                  <div className="context-epoch-note">
-                    <LuShieldCheck aria-hidden />
-                    <div>
-                      <strong>会话隔离 · 当前上下文第 {detail.run.current_epoch_ordinal} 段</strong>
-                      <p>
-                        这条 Thought 属于第 {detail.run.context_epoch_ordinal} 段。
-                        {detail.run.context_epoch_ordinal < detail.run.current_epoch_ordinal
-                          ? " 它是重置前的历史记录，不会再进入后续上下文。"
-                          : " 同一段内的已提交消息与思绪会传给下一轮。"}
-                      </p>
+                  <div className="thought-inspector-content">
+                    <div className="context-epoch-note">
+                      <LuShieldCheck aria-hidden />
+                      <div>
+                        <strong>会话隔离 · 当前上下文第 {detail.run.current_epoch_ordinal} 段</strong>
+                        <p>
+                          这条 Thought 属于第 {detail.run.context_epoch_ordinal} 段。
+                          {detail.run.context_epoch_ordinal < detail.run.current_epoch_ordinal
+                            ? " 它是重置前的历史记录，不会再进入后续上下文。"
+                            : " 同一段内的已提交消息与思绪会传给下一轮。"}
+                        </p>
+                      </div>
                     </div>
-                  </div>
 
-                  <dl className="thought-facts">
-                    <div><dt>触发原因</dt><dd>{detail.run.trigger_reason}</dd></div>
-                    <div><dt>开始时间</dt><dd>{formatDateTime(detail.run.started_at)}</dd></div>
-                    <div><dt>结束时间</dt><dd>{formatDateTime(detail.run.completed_at)}</dd></div>
-                    <div><dt>模型调用</dt><dd>{detail.calls.length} 轮</dd></div>
-                    <div><dt>新消息范围</dt><dd>{detail.run.new_message_start_id ? "本轮已记录" : "没有新消息"}</dd></div>
-                    <div><dt>最终决策</dt><dd>{detail.run.decision ?? "—"}</dd></div>
-                  </dl>
+                    <dl className="thought-facts">
+                      <div><dt>触发原因</dt><dd>{detail.run.trigger_reason}</dd></div>
+                      <div><dt>开始时间</dt><dd>{formatDateTime(detail.run.started_at)}</dd></div>
+                      <div><dt>结束时间</dt><dd>{formatDateTime(detail.run.completed_at)}</dd></div>
+                      <div><dt>模型调用</dt><dd>{detail.calls.length} 轮</dd></div>
+                      <div><dt>新消息范围</dt><dd>{detail.run.new_message_start_id ? "本轮已记录" : "没有新消息"}</dd></div>
+                      <div><dt>最终决策</dt><dd>{detail.run.decision ?? "—"}</dd></div>
+                    </dl>
 
-                  <section className="thought-context-map">
+                    <section className="thought-context-map">
                     <header>
                       <div><LuListTree aria-hidden /><h3>本次上下文构成</h3></div>
                       <p>按来源分区展示实际进入模型的内容；同一输入在多轮调用中只列一次。</p>
                     </header>
 
-                    {systemPrompts.length > 0 && (
+                    {systemInstructions.length > 0 && (
                       <section className="context-source-section system-source">
                         <header>
                           <LuShieldCheck aria-hidden />
-                          <div><h4>系统提示</h4><p>稳定身份、行为边界、证据与工具规则。</p></div>
-                          <span>{systemPrompts.length} 条</span>
+                          <div>
+                            <h4>模型调用指令</h4>
+                            <p>模型调用无状态；每次相关请求会携带所需指令一次。这里按内容去重展示。</p>
+                          </div>
+                          <span>{systemInstructions.length} 类</span>
                         </header>
-                        {systemPrompts.map((prompt, index) => (
-                          <details key={`system-${index}`}>
-                            <summary>查看系统提示 {systemPrompts.length > 1 ? index + 1 : ""}</summary>
-                            <p>{prompt}</p>
+                        {systemInstructions.map((instruction) => (
+                          <details
+                            className={`instruction-${instruction.kind}`}
+                            key={`${instruction.kind}-${instruction.content}`}
+                          >
+                            <summary>
+                              <span>{instruction.label}</span>
+                              <small>{instruction.description}</small>
+                            </summary>
+                            <p>{instruction.content}</p>
                           </details>
                         ))}
                       </section>
@@ -552,12 +557,12 @@ export default function ThoughtRunsPage({
                         </section>
                       );
                     })}
-                  </section>
+                    </section>
 
-                  <section className="thought-process">
+                    <section className="thought-process">
                     <header>
-                      <div><LuBrainCircuit aria-hidden /><h3>本次 Thought 过程</h3></div>
-                      <p>自然思绪、只读工具与动作编译按实际调用顺序展开。</p>
+                      <div><LuBrainCircuit aria-hidden /><h3>本次 Thought 的模型调用</h3></div>
+                      <p>以下只属于本次运行：主模型、只读工具续轮与动作编译按实际请求顺序展开。</p>
                     </header>
 
                     {detail.calls.map((call) => {
@@ -568,7 +573,7 @@ export default function ThoughtRunsPage({
                           <header>
                             <div>
                               <span className="round-number">{call.sequence_number}</span>
-                              <strong>{purposeLabel(call.purpose)}</strong>
+                              <strong>{thoughtCallStageLabel(call)}</strong>
                               <small>{call.profile} · {call.model ?? call.provider}</small>
                             </div>
                             <span>{call.input_tokens ?? 0} in / {call.output_tokens ?? 0} out · {call.latency_ms ?? 0} ms</span>
@@ -606,9 +611,13 @@ export default function ThoughtRunsPage({
 
                           <details className="model-context">
                             <summary><LuListTree aria-hidden />查看本轮完整模型载荷</summary>
+                            <p className="model-payload-note">
+                              这是一次独立 API 请求。系统类消息按职责标注；工具续轮会重发同一行为指令，
+                              不会把它逐轮追加到上下文中。
+                            </p>
                             {call.request_context.map((message, index) => (
                               <article key={`${call.id}-message-${index}`}>
-                                <span>{roleLabel(message.role)}</span>
+                                <span>{roleLabel(message)}</span>
                                 <pre>{message.content || (message.tool_calls?.length ? "模型请求调用只读工具" : "（空内容）")}</pre>
                               </article>
                             ))}
@@ -616,7 +625,8 @@ export default function ThoughtRunsPage({
                         </section>
                       );
                     })}
-                  </section>
+                    </section>
+                  </div>
                 </div>
               </>
             )}

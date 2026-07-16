@@ -82,7 +82,7 @@ test("provider routes by explicit profile and returns audit metadata", async () 
   );
 });
 
-test("DashScope JSON Object mode receives the exact schema with thinking disabled", async () => {
+test("DashScope adds one distinct format contract per stateless structured request", async () => {
   const calls = [];
   const provider = new OpenAiCompatibleProvider({
     loadProfile: async () => ({
@@ -98,16 +98,22 @@ test("DashScope JSON Object mode receives the exact schema with thinking disable
       }), { status: 200, headers: { "Content-Type": "application/json" } });
     },
   });
-  const result = await provider.complete({
+  const messages = [
+    { role: "system", content: "You are a deterministic action compiler." },
+    { role: "user", content: "Return the requested result." },
+  ];
+  const request = {
     profile: "fast",
-    messages: [{ role: "user", content: "Return the requested result." }],
+    messages,
     responseSchema: {
       type: "object",
       additionalProperties: false,
       properties: { ok: { type: "boolean" } },
       required: ["ok"],
     },
-  });
+  };
+  const result = await provider.complete(request);
+  await provider.complete(request);
   assert.equal(openAiCompatibleDialect(
     "https://dashscope.aliyuncs.com/compatible-mode/v1",
   ), "dashscope-chat");
@@ -118,7 +124,14 @@ test("DashScope JSON Object mode receives the exact schema with thinking disable
   assert.match(calls[0].messages[0].content, /"additionalProperties":false/);
   assert.match(calls[0].messages[0].content, /"required":\["ok"\]/);
   assert.deepEqual(result.requestMessages, calls[0].messages);
-  assert.equal(calls[0].messages[1].content, "Return the requested result.");
+  assert.equal(calls[0].messages[1].content, "You are a deterministic action compiler.");
+  assert.equal(calls[0].messages[2].content, "Return the requested result.");
+  assert.equal(calls[0].messages.filter((message) => message.role === "system").length, 2);
+  assert.equal(calls[1].messages.filter((message) => message.role === "system").length, 2);
+  assert.deepEqual(messages, [
+    { role: "system", content: "You are a deterministic action compiler." },
+    { role: "user", content: "Return the requested result." },
+  ]);
 });
 
 test("OpenAI structured requests preserve the projected message array", async () => {
