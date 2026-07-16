@@ -28,7 +28,7 @@ scheduler -> queued job_run -> worker lease + heartbeat
 
 Migration `0006_glorious_rictor` 已建立 `thought_streams`、`thought_stream_epochs`、带 Stream/Epoch/Turn 顺序的 `thought_runs`，以及与实际副作用分离的 `action_proposals`。后续迁移加入 primary/compiler 检查点和 `outbound_policies / speech_decisions / outbound_deliveries`。`llm_calls.purpose` 区分 primary、工具续轮、compiler、revision 和 compression；消息使用 `author_kind`、`direction`、平台消息 ID 与 receipt 表达用户、Asuka 和平台回显。
 
-上下文 projector 已按 Stream 读取首次初始化历史并集、当前 Epoch 已提交 Turn、压缩输出和本轮新消息。它以模型配置的 `context_window` 计算预算，先裁剪可选历史/低相关记忆，再按时间将必选新消息分块；每块成功后才推进到该块末尾。每次供应商实际收到的 messages 和所引用的 context items 都写入 `llm_calls`，可由 inspector 精确重放。当前正式 memory store 尚未实现，因此 recalled-memory 段保持为空，但顺序和预算接口已经固定。
+上下文 projector 已按 Stream 读取首次初始化历史并集、当前 Epoch 已提交 Turn、压缩输出和本轮新消息。它以模型配置的 `context_window` 计算预算，先裁剪可选历史/低相关记忆，再按时间将必选新消息分块；每块成功后才推进到该块末尾。每次供应商实际收到的无请求头 JSON 请求体、messages 和所引用的 context items 都写入 `llm_calls`，可由 inspector 原样重放；API Key 只存在于请求头，不进入审计载荷。当前正式 memory store 尚未实现，因此 recalled-memory 段保持为空，但顺序和预算接口已经固定。
 
 本仓库仍处于内部开发测试期，`0006` 不为旧 Thought Run 生成兼容 Stream 或 Epoch。已有 0005 测试数据的本地环境应先重建测试数据库，再从完整 migration chain 恢复；不要手工补列或直接改表。若需要回退本项，实现层回滚提交后同样重建测试数据库至目标 migration，而不是尝试保留临时测试数据。
 
@@ -70,7 +70,7 @@ sent_at / conversation_type(group|private) / content
 2. **稳定 tools（按能力启用）**：通过 API `tools` 参数传递，名称、顺序和 schema 保持稳定。首版只开放消息搜索、记忆召回等只读工具。
 3. **上一 epoch 的压缩输出（压缩后必选）**：正在继续的话题、承诺、未决问题、关系状态、关键 memory 引用与最后动作状态。
 4. **初始化历史（可选）**：仅 Stream 的第一个 Epoch、第一轮 Thought 加入。选择“最近 N 条”和“最近 N 分钟”的并集，按 message ID 去重、时间升序排列，并受 token budget 限制；压缩或手动重置产生的后续 Epoch 都不会回填它。
-5. **本 epoch 已提交的 Thought Turns（必选）**：保持原始顺序，包括新输入、主模型自然输出、必要工具调用/结果以及动作执行状态。
+5. **本 epoch 已提交的 Thought Turns（必选）**：保持原始顺序，包括新输入和主模型最终自然输出。工具调用命令与结果进入本段的后续模型调用，但原始 trace 不跨 Thought 重发；需要跨段保留的工具结论必须体现在最终自然输出中。
 6. **本轮召回记忆（可选）**：放在动态尾部，附 memory ID、subject/source、有效期、敏感度和证据；低置信或不可披露内容不注入。
 7. **本轮新增来源（必选）**：watermark 后的 IM 消息；未来可增加外部 source event。新输入永远放在最后。
 
@@ -113,7 +113,7 @@ trigger + conversation lease
 
 该记录不是供应商隐藏 chain-of-thought，也不要求逐 token 展示私有推理。系统保存模型主动给出的结论、依据、联想和行动草稿，以便后续连续思考和用户审计。
 
-控制台审计大纲必须区分两类持久化语义：“进入后续上下文”表示内容会再次发送给下一次主模型；“仅执行记录”表示调用、失败、原始载荷或 fast 编译结果只用于审计。两类记录都保存在 PostgreSQL，但移除所有“仅执行记录”后，固定 system/tools 加上标为“进入后续上下文”的原文应能还原下一次主模型上下文。
+控制台审计大纲必须区分三类上下文语义：“进入本段后续调用上下文”表示工具调用命令与返回会原样发送给本 Thought 的下一轮主模型；“进入下一段 Thought 上下文”表示内容会跨 Thought 再次发送；“仅执行记录”表示失败或 fast 编译结果只用于审计。三类记录都保存在 PostgreSQL。每次调用的“完整调用载荷”直接展示实际发送给 Provider 的无请求头原始 JSON；移除“仅执行记录”后，固定 system/tools 加上相应范围内的绿色原文应能还原目标主模型调用的上下文。
 
 主模型可以多轮调用只读工具。发送消息、写正式记忆、删除或修改外部状态等副作用不能作为工具直接执行，只能在最终文本中提出候选动作。
 

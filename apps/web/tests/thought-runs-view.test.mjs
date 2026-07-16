@@ -9,6 +9,7 @@ import {
   describeSystemInstruction,
   describeToolArguments,
   groupThoughtRuns,
+  recordedRequestPayload,
   thoughtCallStageLabel,
   toolDescription,
 } from "../app/components/thought-runs-view.ts";
@@ -177,4 +178,40 @@ test("identical persisted request hashes expose an actual retry index", () => {
   ];
   assert.equal(callRetryIndex(calls, calls[0]), 0);
   assert.equal(callRetryIndex(calls, calls[2]), 1);
+});
+
+test("full call payload prefers the exact provider JSON and keeps tools in legacy records", () => {
+  const exactJson = "{\"model\":\"primary\",\"messages\":[],\"tools\":[{\"type\":\"function\"}]}";
+  assert.deepEqual(recordedRequestPayload({
+    request_context: [],
+    context_items: [{
+      id: "payload",
+      itemType: "request_payload",
+      referenceId: "prompt-v1",
+      title: "Provider request JSON",
+      content: exactJson,
+      metadata: { section: "provider_request" },
+    }],
+  }), { exact: true, json: exactJson });
+
+  const legacy = recordedRequestPayload({
+    request_context: [{ role: "user", content: "查一下" }],
+    context_items: [{
+      id: "tool",
+      itemType: "tool_definition",
+      referenceId: "search_conversation_messages",
+      title: "Read-only tool",
+      content: "Search messages",
+      metadata: { section: "tools", schema: { type: "object" } },
+    }],
+  });
+  assert.equal(legacy.exact, false);
+  assert.deepEqual(JSON.parse(legacy.json).tools, [{
+    type: "function",
+    function: {
+      name: "search_conversation_messages",
+      description: "Search messages",
+      parameters: { type: "object" },
+    },
+  }]);
 });

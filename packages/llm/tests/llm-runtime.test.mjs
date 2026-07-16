@@ -5,6 +5,7 @@ import {
   decryptApiKey,
   encryptApiKey,
   LlmConfigurationError,
+  openAiCompatibleRequestPayload,
   OpenAiCompatibleProvider,
   openAiCompatibleDialect,
   parseEncryptionKey,
@@ -80,6 +81,7 @@ test("provider routes by explicit profile and returns audit metadata", async () 
     { model: response.model, inputTokens: response.inputTokens, outputTokens: response.outputTokens },
     { model: "fast-model-2026", inputTokens: 4, outputTokens: 1 },
   );
+  assert.deepEqual(response.requestPayload, JSON.parse(calls[0].init.body));
 });
 
 test("DashScope adds one distinct format contract per stateless structured request", async () => {
@@ -124,6 +126,7 @@ test("DashScope adds one distinct format contract per stateless structured reque
   assert.match(calls[0].messages[0].content, /"additionalProperties":false/);
   assert.match(calls[0].messages[0].content, /"required":\["ok"\]/);
   assert.deepEqual(result.requestMessages, calls[0].messages);
+  assert.deepEqual(result.requestPayload, calls[0]);
   assert.equal(calls[0].messages[1].content, "You are a deterministic action compiler.");
   assert.equal(calls[0].messages[2].content, "Return the requested result.");
   assert.equal(calls[0].messages.filter((message) => message.role === "system").length, 2);
@@ -165,6 +168,7 @@ test("OpenAI structured requests preserve the projected message array", async ()
   });
   assert.deepEqual(requestBody.messages, messages);
   assert.deepEqual(result.requestMessages, messages);
+  assert.deepEqual(result.requestPayload, requestBody);
 });
 
 test("provider HTTP errors retain a redacted actionable detail", async () => {
@@ -268,7 +272,38 @@ test("provider forwards native read-only tools and accepts a tool-only assistant
   });
   assert.deepEqual(requestBody.tools, tools);
   assert.equal(requestBody.tool_choice, "auto");
+  assert.deepEqual(result.requestPayload, requestBody);
   assert.equal(result.content, "");
   assert.equal(result.toolCalls[0].function.name, "search_conversation_messages");
   assert.equal(result.finishReason, "tool_calls");
+});
+
+test("provider request payload is the exact secret-free JSON body", () => {
+  const tools = [{
+    type: "function",
+    function: {
+      name: "recall_memories",
+      description: "Read reviewed memories",
+      parameters: { type: "object", properties: {} },
+    },
+  }];
+  const payload = openAiCompatibleRequestPayload({
+    baseUrl: "https://models.example/v1",
+    modelId: "primary-model",
+    apiKey: "must-not-appear",
+  }, {
+    messages: [{ role: "user", content: "回忆一下" }],
+    tools,
+    toolChoice: "auto",
+    maxOutputTokens: 4_096,
+  });
+
+  assert.deepEqual(payload, {
+    model: "primary-model",
+    messages: [{ role: "user", content: "回忆一下" }],
+    tools,
+    tool_choice: "auto",
+    max_tokens: 4_096,
+  });
+  assert.doesNotMatch(JSON.stringify(payload), /must-not-appear/);
 });

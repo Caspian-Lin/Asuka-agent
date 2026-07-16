@@ -238,6 +238,34 @@ export function callRetryIndex<T extends { id: string; input_hash?: string | nul
   )).length;
 }
 
+export function recordedRequestPayload(call: {
+  request_context: unknown[];
+  context_items: ThoughtContextItem[];
+}) {
+  const exact = call.context_items.find((item) => (
+    item.itemType === "request_payload" && item.content?.trim()
+  ))?.content?.trim();
+  if (exact) return { exact: true, json: exact };
+
+  const tools = call.context_items
+    .filter((item) => item.itemType === "tool_definition" && item.referenceId)
+    .map((item) => ({
+      type: "function",
+      function: {
+        name: item.referenceId,
+        description: item.content,
+        parameters: item.metadata?.schema,
+      },
+    }));
+  return {
+    exact: false,
+    json: JSON.stringify({
+      messages: call.request_context,
+      ...(tools.length ? { tools } : {}),
+    }),
+  };
+}
+
 const toolLabels: Record<string, string> = {
   lookup_message_sources: "读取消息原文",
   recall_memories: "召回已审核记忆",

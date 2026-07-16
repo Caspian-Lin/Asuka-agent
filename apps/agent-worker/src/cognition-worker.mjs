@@ -43,6 +43,7 @@ import {
 import {
   decryptApiKey,
   LlmConfigurationError,
+  openAiCompatibleRequestPayload,
   OpenAiCompatibleProvider,
   parseEncryptionKey,
 } from "@asuka-agent/llm/runtime";
@@ -1838,7 +1839,9 @@ export function createCognitionWorker({
     const failure = error ? cognitionError(error) : null;
     const now = clock();
     const callId = randomUUID();
-    const requestMessages = result?.requestMessages ?? request.messages;
+    const requestPayload = result?.requestPayload ??
+      openAiCompatibleRequestPayload(configuration, request);
+    const requestMessages = requestPayload.messages;
     let provider = "openai-compatible";
     try {
       provider = new URL(configuration?.baseUrl).host;
@@ -1862,7 +1865,7 @@ export function createCognitionWorker({
           ${context.conversation.conversation_id}, ${run.correlation_id},
           ${request.profile}, ${provider},
           ${result?.model ?? configuration?.modelId ?? null},
-          ${request.promptVersion}, ${stableHash(requestMessages)},
+          ${request.promptVersion}, ${stableHash(requestPayload)},
           ${result ? stableHash(result.content) : null},
           ${failure ? "failed" : "succeeded"}, ${failure?.code ?? null},
           ${result?.latencyMs ?? null}, ${result?.inputTokens ?? projection?.inputTokens ?? null},
@@ -1879,6 +1882,16 @@ export function createCognitionWorker({
       `;
       const contextItems = [
         ...(projection?.contextItems ?? []),
+        {
+          itemType: "request_payload",
+          referenceId: request.promptVersion,
+          title: "Provider request JSON",
+          content: JSON.stringify(requestPayload),
+          metadata: {
+            section: "provider_request",
+            excludesHeaders: true,
+          },
+        },
         ...(request.tools ?? []).map((tool) => ({
           itemType: "tool_definition",
           referenceId: tool.function.name,
