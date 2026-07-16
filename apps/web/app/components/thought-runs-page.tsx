@@ -18,10 +18,13 @@ import {
 import { controlRequest } from "./control-api";
 import {
   collectContextSections,
+  collectPrimarySystemInstructions,
   describeSystemInstruction,
   describeToolArguments,
   groupThoughtRuns,
+  isPrimaryAgentPurpose,
   thoughtCallStageLabel,
+  toolDescription,
   toolLabel,
   type ThoughtContextItem,
   type ThoughtContextSectionKey,
@@ -141,6 +144,11 @@ const contextSectionCopy: Record<ThoughtContextSectionKey, {
   description: string;
   icon: IconType;
 }> = {
+  available_tools: {
+    title: "可用只读工具",
+    description: "提供给主 Agent 的能力清单；可用不代表本次运行实际调用过。",
+    icon: LuWrench,
+  },
   compression: {
     title: "上一段上下文摘要",
     description: "只在自动压缩后进入新上下文；手动重置不会携带这份摘要。",
@@ -213,6 +221,9 @@ function contextItemTitle(item: ThoughtContextItem) {
   if (item.itemType === "thought_turn") {
     const turn = Number(item.metadata?.turnOrdinal);
     return Number.isFinite(turn) ? `历史 Thought · 第 ${turn} 轮` : "历史 Thought";
+  }
+  if (item.itemType === "tool_definition") {
+    return toolLabel(item.referenceId ?? item.title);
   }
   return item.title;
 }
@@ -375,20 +386,16 @@ export default function ThoughtRunsPage({
     { calls: 0, tokens: 0 },
   ), [runs]);
   const groups = useMemo(() => groupThoughtRuns(runs), [runs]);
-  const contextSections = useMemo(
-    () => detail ? collectContextSections(detail.calls) : [],
+  const primaryContextCalls = useMemo(
+    () => (detail?.calls ?? []).filter((call) => isPrimaryAgentPurpose(call.purpose)),
     [detail],
   );
+  const contextSections = useMemo(
+    () => collectContextSections(primaryContextCalls),
+    [primaryContextCalls],
+  );
   const systemInstructions = useMemo(() => {
-    const seen = new Set<string>();
-    return (detail?.calls ?? []).flatMap((call) => call.request_context)
-      .filter((message) => message.role === "system" && message.content)
-      .flatMap((message) => {
-        const content = String(message.content);
-        if (seen.has(content)) return [];
-        seen.add(content);
-        return [{ content, ...describeSystemInstruction(content) }];
-      });
+    return collectPrimarySystemInstructions(detail?.calls ?? []);
   }, [detail]);
 
   return (
@@ -507,8 +514,8 @@ export default function ThoughtRunsPage({
 
                     <section className="thought-context-map">
                     <header>
-                      <div><LuListTree aria-hidden /><h3>本次上下文构成</h3></div>
-                      <p>按来源分区展示实际进入模型的内容；同一输入在多轮调用中只列一次。</p>
+                      <div><LuListTree aria-hidden /><h3>主 Agent 上下文构成</h3></div>
+                      <p>这里只汇总主 Agent 实际读取的内容；fast compiler 的结构化约束留在对应调用中。</p>
                     </header>
 
                     {systemInstructions.length > 0 && (
@@ -516,8 +523,8 @@ export default function ThoughtRunsPage({
                         <header>
                           <LuShieldCheck aria-hidden />
                           <div>
-                            <h4>模型调用指令</h4>
-                            <p>模型调用无状态；每次相关请求会携带所需指令一次。这里按内容去重展示。</p>
+                            <h4>主 Agent 行为指令</h4>
+                            <p>每次主 Agent 请求携带一次；工具续轮复用同一份，不会累积副本。</p>
                           </div>
                           <span>{systemInstructions.length} 类</span>
                         </header>
@@ -550,7 +557,17 @@ export default function ThoughtRunsPage({
                             {section.items.map((item) => (
                               <article key={item.id}>
                                 <strong>{contextItemTitle(item)}</strong>
-                                {item.content && <p>{item.content}</p>}
+                                {item.itemType === "tool_definition" ? (
+                                  <>
+                                    <p>{toolDescription(item.referenceId ?? "", item.content)}</p>
+                                    {item.metadata?.schema && (
+                                      <details className="tool-schema">
+                                        <summary>查看参数约束</summary>
+                                        <pre>{JSON.stringify(item.metadata.schema, null, 2)}</pre>
+                                      </details>
+                                    )}
+                                  </>
+                                ) : item.content && <p>{item.content}</p>}
                               </article>
                             ))}
                           </div>
@@ -612,8 +629,9 @@ export default function ThoughtRunsPage({
                           <details className="model-context">
                             <summary><LuListTree aria-hidden />查看本轮完整模型载荷</summary>
                             <p className="model-payload-note">
-                              这是一次独立 API 请求。系统类消息按职责标注；工具续轮会重发同一行为指令，
-                              不会把它逐轮追加到上下文中。
+                              {call.purpose === "compiler"
+                                ? "这是 fast compiler 的独立请求；JSON 输出格式约束只服务于动作编译，不属于主 Agent 上下文。"
+                                : "这是主 Agent 的一次独立请求；工具续轮会重发同一行为指令，不会逐轮追加副本。"}
                             </p>
                             {call.request_context.map((message, index) => (
                               <article key={`${call.id}-message-${index}`}>

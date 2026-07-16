@@ -8,6 +8,8 @@ import {
   LuDatabase,
   LuMessagesSquare,
   LuMessageSquareReply,
+  LuPanelLeftClose,
+  LuPanelLeftOpen,
   LuSettings,
 } from "react-icons/lu";
 import type { IconType } from "react-icons";
@@ -15,6 +17,10 @@ import ImChannelPage from "@/app/components/im-channel-page";
 import JobsPage from "@/app/components/jobs-page";
 import LlmSettingsPanel from "@/app/components/llm-settings-panel";
 import MemoriesPage from "@/app/components/memories-page";
+import {
+  NAV_RAIL_COLLAPSED_STORAGE_KEY,
+  parseNavRailCollapsed,
+} from "@/app/components/navigation-preferences";
 import SpeechDecisionsPage from "@/app/components/speech-decisions-page";
 import ThemeSettingsPanel from "@/app/components/theme-settings-panel";
 import {
@@ -39,6 +45,7 @@ export default function AgentConsole() {
   const [activeView, setActiveView] = useState<ViewKey>("channels");
   const [requestedThoughtRunId, setRequestedThoughtRunId] = useState<string | null>(null);
   const [colorTheme, setColorTheme] = useState<ColorTheme>("classic");
+  const [railCollapsed, setRailCollapsed] = useState(false);
 
   useEffect(() => {
     const syncStoredTheme = () => {
@@ -63,6 +70,27 @@ export default function AgentConsole() {
     };
   }, []);
 
+  useEffect(() => {
+    const syncStoredRailState = () => {
+      let storedState: string | null = null;
+      try {
+        storedState = window.localStorage.getItem(NAV_RAIL_COLLAPSED_STORAGE_KEY);
+      } catch {
+        // Storage can be unavailable in locked-down browser profiles.
+      }
+      setRailCollapsed(parseNavRailCollapsed(storedState));
+    };
+    const timer = window.setTimeout(syncStoredRailState, 0);
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === NAV_RAIL_COLLAPSED_STORAGE_KEY) syncStoredRailState();
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
+
   function changeColorTheme(theme: ColorTheme) {
     setColorTheme(theme);
     document.documentElement.dataset.colorTheme = theme;
@@ -78,9 +106,31 @@ export default function AgentConsole() {
     setActiveView("thoughts");
   }
 
+  function toggleRail() {
+    setRailCollapsed((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(NAV_RAIL_COLLAPSED_STORAGE_KEY, String(next));
+      } catch {
+        // The active tab still keeps the selected state when storage is unavailable.
+      }
+      return next;
+    });
+  }
+
   return (
-    <main className="agent-shell">
-      <aside className="side-rail">
+    <main className={`agent-shell${railCollapsed ? " rail-collapsed" : ""}`}>
+      <aside className="side-rail" id="primary-navigation-rail">
+        <button
+          className="rail-collapse-button"
+          onClick={toggleRail}
+          aria-controls="primary-navigation-rail"
+          aria-expanded={!railCollapsed}
+          aria-label={railCollapsed ? "展开导航侧栏" : "折叠导航侧栏"}
+          title={railCollapsed ? "展开导航侧栏" : "折叠导航侧栏"}
+        >
+          {railCollapsed ? <LuPanelLeftOpen aria-hidden /> : <LuPanelLeftClose aria-hidden />}
+        </button>
         <button className="brand" onClick={() => setActiveView("channels")} aria-label="返回 IM Channel">
           <span className="brand-mark"><LuBot aria-hidden /></span>
           <span><strong>Asuka</strong><small>Agent</small></span>
@@ -95,6 +145,7 @@ export default function AgentConsole() {
                 className={activeView === item.key ? "active" : ""}
                 onClick={() => setActiveView(item.key)}
                 aria-current={activeView === item.key ? "page" : undefined}
+                title={item.label}
               >
                 <span><Icon aria-hidden /></span>{item.label}
               </button>

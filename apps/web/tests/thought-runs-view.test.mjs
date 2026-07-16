@@ -3,10 +3,12 @@ import test from "node:test";
 
 import {
   collectContextSections,
+  collectPrimarySystemInstructions,
   describeSystemInstruction,
   describeToolArguments,
   groupThoughtRuns,
   thoughtCallStageLabel,
+  toolDescription,
 } from "../app/components/thought-runs-view.ts";
 
 test("thought runs stay grouped by conversation in latest-seen order", () => {
@@ -42,6 +44,33 @@ test("context sources are deduplicated and separated by provenance", () => {
   assert.equal(sections[1].items.length, 1);
 });
 
+test("provided read-only tools stay visible while compiler manifests stay hidden", () => {
+  const sections = collectContextSections([{ context_items: [
+    {
+      id: "tool-1",
+      itemType: "tool_definition",
+      referenceId: "search_conversation_messages",
+      title: "Read-only tool",
+      content: "Search messages",
+      metadata: { section: "tools", schema: { type: "object" } },
+    },
+    {
+      id: "manifest-1",
+      itemType: "compiler_manifest",
+      referenceId: null,
+      title: "Compiler manifest",
+      content: "{}",
+      metadata: { section: "compiler_manifest" },
+    },
+  ] }]);
+
+  assert.deepEqual(sections.map((section) => section.key), ["available_tools"]);
+  assert.equal(
+    toolDescription("search_conversation_messages"),
+    "按关键词检索当前会话的历史消息，不跨会话读取。",
+  );
+});
+
 test("tool calls describe intent without exposing raw message IDs", () => {
   assert.equal(describeToolArguments(
     "lookup_message_sources",
@@ -66,6 +95,22 @@ test("system instructions are labeled by responsibility instead of sharing one g
     describeSystemInstruction("Return only one valid JSON object.\nJSON Schema: {}").label,
     "输出格式约束",
   );
+});
+
+test("primary context summary excludes compiler JSON constraints and deduplicates continuations", () => {
+  const agentInstruction = { role: "system", content: "You are Asuka. Use evidence." };
+  const instructions = collectPrimarySystemInstructions([
+    { purpose: "primary", request_context: [agentInstruction] },
+    { purpose: "tool_continuation", request_context: [agentInstruction] },
+    { purpose: "compiler", request_context: [
+      { role: "system", content: "Return only one valid JSON object.\nJSON Schema: {}" },
+      { role: "system", content: "You are a deterministic action compiler." },
+    ] },
+  ]);
+
+  assert.deepEqual(instructions.map((instruction) => instruction.label), [
+    "Agent 行为指令",
+  ]);
 });
 
 test("current run calls describe their stage instead of labeling every output as natural thought", () => {

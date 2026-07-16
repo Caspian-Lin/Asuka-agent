@@ -15,6 +15,7 @@ export type ThoughtContextItem = {
 };
 
 export type ThoughtContextSectionKey =
+  | "available_tools"
   | "compression"
   | "history_messages"
   | "history_thoughts"
@@ -45,6 +46,14 @@ export type ThoughtCallStageInput = {
   } | null;
 };
 
+export type ThoughtSystemInstructionCall = {
+  purpose: string;
+  request_context: Array<{
+    role: string;
+    content: string | null;
+  }>;
+};
+
 export function groupThoughtRuns<T extends ThoughtRunListItem>(runs: T[]) {
   const groups = new Map<string, ThoughtRunGroup<T>>();
   for (const run of runs) {
@@ -65,6 +74,9 @@ export function groupThoughtRuns<T extends ThoughtRunListItem>(runs: T[]) {
 
 export function contextSectionFor(item: ThoughtContextItem): ThoughtContextSectionKey {
   const section = String(item.metadata?.section ?? "");
+  if (item.itemType === "tool_definition" || section === "tools") {
+    return "available_tools";
+  }
   if (item.itemType === "compression" || section === "compression") {
     return "compression";
   }
@@ -80,6 +92,7 @@ export function contextSectionFor(item: ThoughtContextItem): ThoughtContextSecti
 }
 
 const sectionOrder: ThoughtContextSectionKey[] = [
+  "available_tools",
   "compression",
   "history_messages",
   "history_thoughts",
@@ -94,8 +107,7 @@ export function collectContextSections(calls: Array<{ context_items: ThoughtCont
   for (const call of calls) {
     for (const item of call.context_items) {
       const sourceSection = String(item.metadata?.section ?? "");
-      if (item.itemType === "tool_result" || item.itemType === "tool_definition" ||
-          sourceSection === "compiler_manifest") continue;
+      if (item.itemType === "tool_result" || sourceSection === "compiler_manifest") continue;
       const key = [
         item.itemType,
         item.referenceId ?? "",
@@ -122,8 +134,18 @@ const toolLabels: Record<string, string> = {
   search_conversation_messages: "检索会话历史",
 };
 
+const toolDescriptions: Record<string, string> = {
+  lookup_message_sources: "按消息引用核对当前会话中的原始消息、说话人和时间。",
+  recall_memories: "按主题召回当前会话允许读取、且带证据的已审核记忆。",
+  search_conversation_messages: "按关键词检索当前会话的历史消息，不跨会话读取。",
+};
+
 export function toolLabel(name: string) {
   return toolLabels[name] ?? name;
+}
+
+export function toolDescription(name: string, fallback?: string | null) {
+  return toolDescriptions[name] ?? fallback ?? "只读工具";
 }
 
 export function parseToolArguments(value: unknown): Record<string, unknown> {
@@ -182,6 +204,23 @@ export function describeSystemInstruction(content: string): {
     label: "系统级指令",
     description: "这次模型请求所需的其他系统级约束。",
   };
+}
+
+export function isPrimaryAgentPurpose(purpose: string) {
+  return ["primary", "tool_continuation", "revision"].includes(purpose);
+}
+
+export function collectPrimarySystemInstructions(calls: ThoughtSystemInstructionCall[]) {
+  const seen = new Set<string>();
+  return calls.filter((call) => isPrimaryAgentPurpose(call.purpose))
+    .flatMap((call) => call.request_context)
+    .filter((message) => message.role === "system" && message.content)
+    .flatMap((message) => {
+      const content = String(message.content);
+      if (seen.has(content)) return [];
+      seen.add(content);
+      return [{ content, ...describeSystemInstruction(content) }];
+    });
 }
 
 export function thoughtCallStageLabel(call: ThoughtCallStageInput) {

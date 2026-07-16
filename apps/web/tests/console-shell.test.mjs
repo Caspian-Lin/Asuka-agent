@@ -10,6 +10,8 @@ test("console uses PostgreSQL-backed surfaces without legacy demo navigation", a
   assert.match(source, /ThoughtRunsPage/);
   assert.match(source, /MemoriesPage/);
   assert.match(source, /唯一数据源/);
+  assert.match(source, /折叠导航侧栏/);
+  assert.match(source, /rail-collapsed/);
   assert.doesNotMatch(source, /top-bar/);
   assert.doesNotMatch(source, /evaluation/);
   assert.doesNotMatch(source, /\/api\/bootstrap/);
