@@ -115,6 +115,50 @@ export function thoughtEpochIdFor(streamId, ordinal) {
   return `thought-epoch:${stableHash({ streamId, ordinal })}`;
 }
 
+export function committedToolTraceMessages(rows) {
+  return (rows ?? []).flatMap((row) => {
+    const toolCalls = Array.isArray(row.response_json?.toolCalls)
+      ? row.response_json.toolCalls
+      : [];
+    if (!toolCalls.length) return [];
+    const resultByCallId = new Map((row.tool_results ?? []).map((result) => [
+      String(result.referenceId),
+      result,
+    ]));
+    const callId = String(row.id);
+    const sequenceNumber = Number(row.sequence_number);
+    const messages = [{
+      callId,
+      sequenceNumber,
+      message: {
+        role: "assistant",
+        content: row.response_json?.content || null,
+        tool_calls: toolCalls,
+      },
+    }];
+    for (const toolCall of toolCalls) {
+      const result = resultByCallId.get(String(toolCall.id));
+      if (!result) {
+        throw new ThoughtContextError(
+          "committed_tool_result_missing",
+          `已提交调用 ${callId} 缺少工具 ${toolCall.id} 的返回记录`,
+        );
+      }
+      messages.push({
+        callId,
+        sequenceNumber,
+        message: {
+          role: "tool",
+          tool_call_id: String(toolCall.id),
+          name: String(toolCall.function?.name ?? result.metadata?.toolName ?? "unknown_tool"),
+          content: String(result.content),
+        },
+      });
+    }
+    return messages;
+  });
+}
+
 export function cognitionTriggerReason(run) {
   const source = run.trigger_type === "manual" ? "手动触发" : "定时计划到期";
   return run.job_type === "memory_consolidation"
@@ -583,9 +627,23 @@ export function createCognitionWorker({
         SELECT thought.id, thought.turn_ordinal, thought.new_message_start_at,
                thought.new_message_start_id, thought.new_message_end_at,
                thought.new_message_end_id,
-               COALESCE(call.response_json ->> 'content', thought.primary_output) AS primary_output,
+               COALESCE(
+                 revision.response_json ->> 'content',
+                 thought.primary_output,
+                 call.response_json ->> 'content'
+               ) AS primary_output,
                proposal.proposal_state AS action_state
         FROM thought_runs AS thought
+        LEFT JOIN LATERAL (
+          SELECT response_json
+          FROM llm_calls
+          WHERE thought_run_id = thought.id
+            AND purpose = 'revision'
+            AND status = 'succeeded'
+            AND NULLIF(BTRIM(response_json ->> 'content'), '') IS NOT NULL
+          ORDER BY sequence_number DESC
+          LIMIT 1
+        ) AS revision ON true
         LEFT JOIN LATERAL (
           SELECT response_json
           FROM llm_calls
@@ -610,19 +668,45 @@ export function createCognitionWorker({
       `,
     ]);
     const committedTurns = await Promise.all(committedRows.map(async (turn) => {
-      const rows = await sql`
-        SELECT id, author_kind, direction, sender_id, sender_display_name,
-               reply_to_external_message_id, content, created_at
-        FROM messages
-        WHERE conversation_id = ${conversation.id}
-          AND (created_at, id) >= (${turn.new_message_start_at}, ${turn.new_message_start_id})
-          AND (created_at, id) <= (${turn.new_message_end_at}, ${turn.new_message_end_id})
-        ORDER BY created_at, id
-      `;
+      const [rows, toolCallRows] = await Promise.all([
+        sql`
+          SELECT id, author_kind, direction, sender_id, sender_display_name,
+                 reply_to_external_message_id, content, created_at
+          FROM messages
+          WHERE conversation_id = ${conversation.id}
+            AND (created_at, id) >= (${turn.new_message_start_at}, ${turn.new_message_start_id})
+            AND (created_at, id) <= (${turn.new_message_end_at}, ${turn.new_message_end_id})
+          ORDER BY created_at, id
+        `,
+        sql`
+          SELECT call.id, call.sequence_number, call.response_json,
+                 COALESCE(
+                   jsonb_agg(
+                     jsonb_build_object(
+                       'referenceId', item.reference_id,
+                       'content', item.content,
+                       'metadata', item.metadata
+                     ) ORDER BY item.ordinal
+                   ) FILTER (WHERE item.item_type = 'tool_result'),
+                   '[]'::jsonb
+                 ) AS tool_results
+          FROM llm_calls AS call
+          LEFT JOIN llm_call_context_items AS item ON item.llm_call_id = call.id
+          WHERE call.thought_run_id = ${turn.id}
+            AND call.purpose IN ('primary', 'tool_continuation')
+            AND call.status = 'succeeded'
+            AND jsonb_array_length(
+              COALESCE(call.response_json -> 'toolCalls', '[]'::jsonb)
+            ) > 0
+          GROUP BY call.id
+          ORDER BY call.sequence_number
+        `,
+      ]);
       return {
         thoughtRunId: String(turn.id),
         turnOrdinal: Number(turn.turn_ordinal),
         newMessages: rows.map((row) => sourceFromRow(row, conversationType)),
+        toolTraceMessages: committedToolTraceMessages(toolCallRows),
         primaryOutput: turn.primary_output == null ? null : String(turn.primary_output),
         actionState: turn.action_state == null ? null : String(turn.action_state),
       };

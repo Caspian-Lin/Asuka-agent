@@ -58,6 +58,7 @@ export type ThoughtContextTurn = {
   thoughtRunId: string;
   turnOrdinal: number | null;
   messages: ThoughtContextItem[];
+  toolTrace: ThoughtContextItem[];
   thought: ThoughtContextItem | null;
 };
 
@@ -115,7 +116,8 @@ export function collectUniqueContextItems(
   const seen = new Set<string>();
   return calls.flatMap((call) => call.context_items).flatMap((item) => {
     const sourceSection = String(item.metadata?.section ?? "");
-    if (item.itemType === "tool_result" || sourceSection === "compiler_manifest") return [];
+    if ((item.itemType === "tool_result" && sourceSection !== "committed_turn") ||
+        sourceSection === "compiler_manifest" || item.itemType === "request_payload") return [];
     const key = [
       item.itemType,
       item.referenceId ?? "",
@@ -177,6 +179,7 @@ export function buildThoughtContextOutline(
       thoughtRunId: runId,
       turnOrdinal: ordinal,
       messages: [],
+      toolTrace: [],
       thought: null,
     };
     turns.set(runId, turn);
@@ -201,6 +204,17 @@ export function buildThoughtContextOutline(
         ensureTurn(runId, Number.isFinite(ordinal) ? ordinal : null).messages.push(item);
       } else {
         pendingHistory.push(item);
+      }
+    } else if (section === "committed_turn" &&
+        ["assistant_tool_call", "tool_result"].includes(item.itemType)) {
+      const runId = typeof item.metadata?.thoughtRunId === "string"
+        ? item.metadata.thoughtRunId
+        : null;
+      const ordinal = Number(item.metadata?.turnOrdinal);
+      if (runId) {
+        ensureTurn(runId, Number.isFinite(ordinal) ? ordinal : null).toolTrace.push(item);
+      } else {
+        outline.other.push(item);
       }
     } else if (section === "committed_turn" && item.itemType === "thought_turn") {
       const runId = item.referenceId ?? `unknown-turn-${outline.previousTurns.length + 1}`;

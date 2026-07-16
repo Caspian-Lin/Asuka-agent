@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  estimateChatTokens,
   projectThoughtContext,
   selectInitializationHistory,
   shouldUseInitializationHistory,
@@ -31,6 +32,25 @@ function source(id, {
 }
 
 const systemMessages = [{ role: "system", content: "You are Asuka. Stable prompt." }];
+
+test("token estimates include persisted tool-call arguments and result identity", () => {
+  const plain = estimateChatTokens([{ role: "assistant", content: null }]);
+  const withTools = estimateChatTokens([{
+    role: "assistant",
+    content: null,
+    tool_calls: [{
+      id: "call-1",
+      type: "function",
+      function: { name: "recall_memories", arguments: "{\"query\":\"露营计划\"}" },
+    }],
+  }, {
+    role: "tool",
+    tool_call_id: "call-1",
+    name: "recall_memories",
+    content: "{\"ok\":true}",
+  }]);
+  assert.ok(withTools > plain);
+});
 
 test("initialization history is the deduplicated union of last N and recent minutes", () => {
   const messages = [
@@ -127,6 +147,28 @@ test("projection keeps stable order and exact auditable context items", () => {
       thoughtRunId: "turn-1",
       turnOrdinal: 1,
       newMessages: [source("committed-1")],
+      toolTraceMessages: [{
+        callId: "call-1",
+        sequenceNumber: 1,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "tool-call-1",
+            type: "function",
+            function: { name: "recall_memories", arguments: "{\"query\":\"露营\"}" },
+          }],
+        },
+      }, {
+        callId: "call-1",
+        sequenceNumber: 1,
+        message: {
+          role: "tool",
+          tool_call_id: "tool-call-1",
+          name: "recall_memories",
+          content: "{\"ok\":true,\"memories\":[]}",
+        },
+      }],
       primaryOutput: "我还在等大家确认天气。",
       actionState: "no_action",
     }],
@@ -144,11 +186,13 @@ test("projection keeps stable order and exact auditable context items", () => {
   }).chunks[0];
 
   assert.deepEqual(projection.messages.map((message) => message.role), [
-    "system", "user", "user", "user", "assistant", "user", "user",
+    "system", "user", "user", "user", "assistant", "tool", "assistant", "user", "user",
   ]);
   assert.deepEqual(projection.contextItems.map((item) => item.metadata.section), [
     "compression",
     "initialization_history",
+    "committed_turn",
+    "committed_turn",
     "committed_turn",
     "committed_turn",
     "recalled_memory",
@@ -159,6 +203,15 @@ test("projection keeps stable order and exact auditable context items", () => {
   ));
   assert.equal(committedMessage.metadata.thoughtRunId, "turn-1");
   assert.equal(committedMessage.metadata.turnOrdinal, 1);
+  assert.deepEqual(projection.messages[4].tool_calls[0].function, {
+    name: "recall_memories",
+    arguments: "{\"query\":\"露营\"}",
+  });
+  assert.equal(projection.messages[5].content, "{\"ok\":true,\"memories\":[]}");
+  assert.deepEqual(
+    projection.contextItems.slice(3, 5).map((item) => item.itemType),
+    ["assistant_tool_call", "tool_result"],
+  );
   assert.match(projection.messages[1].content, /上一上下文段摘要/);
   assert.equal(projection.newMessageStartId, "new-1");
   assert.equal(projection.newMessageEndId, "new-1");

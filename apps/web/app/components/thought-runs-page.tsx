@@ -363,7 +363,7 @@ function ToolInvocation({
       <summary>
         <span>{toolLabel(toolCall.function.name)}</span>
         <span className="audit-summary-badges">
-          <AuditBadge tone="persisted">进入本段后续调用上下文</AuditBadge>
+          <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
           {failure && <AuditBadge tone="failure">{failure}</AuditBadge>}
         </span>
       </summary>
@@ -386,15 +386,18 @@ function PrimaryCallNode({
   call,
   calls,
   ordinal,
+  isFinalOutput,
 }: {
   call: LlmCall;
   calls: LlmCall[];
   ordinal: number;
+  isFinalOutput: boolean;
 }) {
   const toolCalls = call.response_json?.toolCalls ?? [];
   const toolResults = call.context_items.filter((item) => item.itemType === "tool_result");
   const retryIndex = callRetryIndex(calls, call);
   const failed = call.status === "failed" || Boolean(call.error_code);
+  const entersContext = !failed && (toolCalls.length > 0 || isFinalOutput);
   return (
     <details className={`audit-node audit-call${failed ? " failed" : ""}`} open>
       <summary>
@@ -408,8 +411,8 @@ function PrimaryCallNode({
         <span className="audit-summary-badges">
           {toolCalls.length > 0 && <AuditBadge tone="current">工具</AuditBadge>}
           {failed && <AuditBadge tone="failure">客观失败</AuditBadge>}
-          <AuditBadge tone={toolCalls.length > 0 ? "persisted" : "execution"}>
-            {toolCalls.length > 0 ? "输出进入本段后续调用上下文" : "仅执行记录"}
+          <AuditBadge tone={entersContext ? "persisted" : "execution"}>
+            {entersContext ? "进入后续上下文" : "仅执行记录"}
           </AuditBadge>
         </span>
       </summary>
@@ -432,7 +435,9 @@ function PrimaryCallNode({
           <section className="audit-model-output">
             <header>
               <strong>模型本次输出</strong>
-              <AuditBadge tone="execution">调用结果</AuditBadge>
+              <AuditBadge tone={entersContext ? "persisted" : "execution"}>
+                {entersContext ? "进入后续上下文" : "调用结果"}
+              </AuditBadge>
             </header>
             <p>{call.response_json.content}</p>
           </section>
@@ -462,7 +467,7 @@ function HistoricalExecution({
     <details className="audit-subnode audit-history-execution">
       <summary>
         <span>当时的执行记录</span>
-        <AuditBadge tone="execution">不进入下一段 Thought 上下文</AuditBadge>
+        <AuditBadge tone="execution">执行摘要</AuditBadge>
       </summary>
       <div className="audit-subnode-body">
         {run.calls.map((call) => {
@@ -557,7 +562,7 @@ function PersistedTurnNode({
         </span>
         <span className="audit-summary-badges">
           <AuditBadge tone="fixed">前序</AuditBadge>
-          <AuditBadge tone="persisted">进入下一段 Thought 上下文</AuditBadge>
+          <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
         </span>
       </summary>
       <div className="audit-node-body">
@@ -568,11 +573,27 @@ function PersistedTurnNode({
           </summary>
           <div className="audit-subnode-body"><OriginalMessageList items={turn.messages} /></div>
         </details>
+        {turn.toolTrace.length > 0 && (
+          <details className="audit-subnode audit-persisted-trace" open>
+            <summary>
+              <span>工具调用与返回原文</span>
+              <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
+            </summary>
+            <div className="audit-subnode-body">
+              {turn.toolTrace.map((item) => (
+                <article className="audit-payload-message" key={item.id}>
+                  <strong>{item.itemType === "tool_result" ? "工具返回" : "模型工具调用"}</strong>
+                  <pre>{item.content}</pre>
+                </article>
+              ))}
+            </div>
+          </details>
+        )}
         {turn.thought && (
           <details className="audit-subnode audit-persisted-output" open>
             <summary>
               <span>最终思绪原文</span>
-              <AuditBadge tone="persisted">进入下一段 Thought 上下文</AuditBadge>
+              <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
             </summary>
             <div className="audit-subnode-body"><p>{turn.thought.content}</p></div>
           </details>
@@ -822,6 +843,17 @@ export default function ThoughtRunsPage({
     Boolean(call.response_json?.content?.trim()) &&
     !(call.response_json?.toolCalls?.length)
   )) ?? null, [primaryContextCalls]);
+  const finalRevisionCall = useMemo(() => [...primaryContextCalls].reverse().find((call) => (
+    call.purpose === "revision" &&
+    call.status === "succeeded" &&
+    Boolean(call.response_json?.content?.trim())
+  )) ?? null, [primaryContextCalls]);
+  const persistedPrimaryOutput = finalRevisionCall?.response_json?.content?.trim() ||
+    detail?.run.primary_output?.trim() || finalNaturalCall?.response_json?.content?.trim() || null;
+  const persistedOutputCallId = useMemo(() => [...primaryContextCalls].reverse().find((call) => (
+    call.status === "succeeded" &&
+    call.response_json?.content?.trim() === persistedPrimaryOutput
+  ))?.id ?? null, [persistedPrimaryOutput, primaryContextCalls]);
   const contextRunsById = useMemo(() => new Map(
     (detail?.contextRuns ?? []).map((run) => [run.id, run]),
   ), [detail]);
@@ -955,17 +987,16 @@ export default function ThoughtRunsPage({
                         <span className="audit-panel-title"><LuListTree aria-hidden /><strong>主模型上下文</strong></span>
                         <span className="audit-summary-badges">
                           <AuditBadge tone="current">原始内容优先</AuditBadge>
-                          <AuditBadge tone="persisted">可还原下一段 Thought 上下文</AuditBadge>
+                          <AuditBadge tone="persisted">可还原后续上下文</AuditBadge>
                         </span>
                       </summary>
                       <div className="audit-panel-body">
                         <div className="audit-legend">
-                          <AuditBadge tone="persisted">进入下一段 Thought 上下文</AuditBadge>
-                          <AuditBadge tone="persisted">进入本段后续调用上下文</AuditBadge>
+                          <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
                           <AuditBadge tone="fixed">固定配置</AuditBadge>
                           <AuditBadge tone="current">本次输入</AuditBadge>
                           <AuditBadge tone="execution">仅执行记录</AuditBadge>
-                          <p>绿色标注表示原文已进入后续模型输入，并明确区分本段工具续轮与下一段 Thought；调用审计本身仍统一保存于 PostgreSQL。</p>
+                          <p>绿色标注表示原文会继续发送给本段后续调用及后续 Thought；调用审计本身仍统一保存于 PostgreSQL。</p>
                         </div>
 
                         <details className="audit-node" open>
@@ -995,7 +1026,7 @@ export default function ThoughtRunsPage({
                           <details className="audit-node audit-persisted-output" key={item.id}>
                             <summary>
                               <span className="audit-node-title"><strong>上一上下文段摘要</strong></span>
-                              <AuditBadge tone="persisted">进入下一段 Thought 上下文</AuditBadge>
+                              <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
                             </summary>
                             <div className="audit-node-body"><p>{item.content}</p></div>
                           </details>
@@ -1026,7 +1057,7 @@ export default function ThoughtRunsPage({
                           <details className="audit-node">
                             <summary>
                               <span className="audit-node-title"><strong>旧版未分组的历史消息</strong></span>
-                              <AuditBadge tone="persisted">进入下一段 Thought 上下文</AuditBadge>
+                              <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
                             </summary>
                             <div className="audit-node-body">
                               <OriginalMessageList items={contextOutline.unassignedHistoryMessages} />
@@ -1042,7 +1073,7 @@ export default function ThoughtRunsPage({
                             </span>
                             <span className="audit-summary-badges">
                               <AuditBadge tone="current">本次</AuditBadge>
-                              <AuditBadge tone="persisted">成功后进入下一段 Thought 上下文</AuditBadge>
+                              <AuditBadge tone="persisted">成功后进入后续上下文</AuditBadge>
                             </span>
                           </summary>
                           <div className="audit-node-body">
@@ -1080,19 +1111,19 @@ export default function ThoughtRunsPage({
                                   call={call}
                                   calls={primaryContextCalls}
                                   ordinal={index + 1}
+                                  isFinalOutput={call.id === persistedOutputCallId}
                                 />
                               ))}
                             </div>
-
-                            <details className="audit-subnode audit-persisted-output" open>
-                              <summary>
-                                <span>最后一轮思绪输出</span>
-                                <AuditBadge tone="persisted">原文进入下一段 Thought 上下文</AuditBadge>
-                              </summary>
-                              <div className="audit-subnode-body">
-                                <p>{finalNaturalCall?.response_json?.content || "尚未形成可提交的最终思绪。"}</p>
-                              </div>
-                            </details>
+                            {persistedPrimaryOutput && !persistedOutputCallId && (
+                              <details className="audit-subnode audit-persisted-output" open>
+                                <summary>
+                                  <span>合并后的本次 Thought</span>
+                                  <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
+                                </summary>
+                                <div className="audit-subnode-body"><p>{persistedPrimaryOutput}</p></div>
+                              </details>
+                            )}
                           </div>
                         </details>
                       </div>
@@ -1112,7 +1143,7 @@ export default function ThoughtRunsPage({
                             proposals={detail.proposals.filter((proposal) => (
                               proposal.compiler_llm_call_id === call.id
                             ))}
-                            finalPrimaryOutput={finalNaturalCall?.response_json?.content ?? null}
+                            finalPrimaryOutput={persistedPrimaryOutput}
                             invalid={detail.run.compiler_state?.invalidCallIds?.includes(call.id) ?? false}
                           />
                         )) : <p className="audit-empty">本次尚未执行 fast compiler。</p>}

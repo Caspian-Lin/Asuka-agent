@@ -147,6 +147,22 @@ test("audit outline groups original messages under their persisted Thought turn"
       metadata: { section: "committed_turn", thoughtRunId: "thought-1", turnOrdinal: 1 },
     },
     {
+      id: "history-tool-call",
+      itemType: "assistant_tool_call",
+      referenceId: "call-1",
+      title: "主模型工具调用",
+      content: "{\"role\":\"assistant\",\"tool_calls\":[]}",
+      metadata: { section: "committed_turn", thoughtRunId: "thought-1", turnOrdinal: 1 },
+    },
+    {
+      id: "history-tool-result",
+      itemType: "tool_result",
+      referenceId: "tool-call-1",
+      title: "工具返回",
+      content: "{\"role\":\"tool\",\"content\":\"ok\"}",
+      metadata: { section: "committed_turn", thoughtRunId: "thought-1", turnOrdinal: 1 },
+    },
+    {
       id: "history-thought",
       itemType: "thought_turn",
       referenceId: "thought-1",
@@ -166,6 +182,10 @@ test("audit outline groups original messages under their persisted Thought turn"
 
   assert.equal(outline.previousTurns.length, 1);
   assert.equal(outline.previousTurns[0].messages[0].content, "周六去露营");
+  assert.deepEqual(
+    outline.previousTurns[0].toolTrace.map((item) => item.itemType),
+    ["assistant_tool_call", "tool_result"],
+  );
   assert.equal(outline.previousTurns[0].thought?.content, "需要继续确认天气。");
   assert.equal(outline.currentMessages[0].content, "我来订营地");
 });

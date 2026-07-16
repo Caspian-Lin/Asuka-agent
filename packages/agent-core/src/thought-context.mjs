@@ -29,7 +29,13 @@ export function estimateTextTokens(value) {
 
 export function estimateChatTokens(messages, tools = []) {
   return messages.reduce(
-    (total, message) => total + 6 + estimateTextTokens(message.content),
+    (total, message) => total + 6 +
+      estimateTextTokens(message.content) +
+      (Array.isArray(message.tool_calls)
+        ? estimateTextTokens(JSON.stringify(message.tool_calls))
+        : 0) +
+      (message.tool_call_id ? estimateTextTokens(message.tool_call_id) : 0) +
+      (message.name ? estimateTextTokens(message.name) : 0),
     0,
   ) + (tools.length ? 8 + estimateTextTokens(JSON.stringify(tools)) : 0);
 }
@@ -152,6 +158,31 @@ function turnEntries(turn) {
       turnOrdinal: Number(turn.turnOrdinal),
     },
   ));
+  for (const trace of turn.toolTraceMessages ?? []) {
+    const message = trace.message ?? {};
+    const isToolResult = message.role === "tool";
+    entries.push({
+      message,
+      item: contextItem({
+        itemType: isToolResult ? "tool_result" : "assistant_tool_call",
+        referenceId: String(message.tool_call_id ?? trace.callId),
+        title: isToolResult
+          ? `工具返回 · ${message.name ?? message.tool_call_id}`
+          : `主模型工具调用 · 第 ${trace.sequenceNumber} 次调用`,
+        content: JSON.stringify(message),
+        section: "committed_turn",
+        metadata: {
+          thoughtRunId: String(turn.thoughtRunId),
+          turnOrdinal: Number(turn.turnOrdinal),
+          callId: String(trace.callId),
+          callSequenceNumber: Number(trace.sequenceNumber),
+          messageRole: String(message.role),
+          toolName: message.name ?? null,
+          toolCallId: message.tool_call_id ?? null,
+        },
+      }),
+    });
+  }
   if (turn.primaryOutput) {
     entries.push({
       message: {
