@@ -152,6 +152,8 @@ test("revision feedback appends to the original primary context without JSON mod
   assert.equal(request.responseSchema, undefined);
   assert.equal(request.messages[1].content, "原思绪");
   assert.match(request.messages[2].content, /缺少证据 ID/);
+  assert.match(request.messages[2].content, /简体中文/);
+  assert.match(request.messages[2].content, /不要输出 JSON/);
 });
 
 test("proposal idempotency is stable across compiler retries", () => {

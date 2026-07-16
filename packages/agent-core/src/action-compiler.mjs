@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const ACTION_COMPILER_PROMPT_VERSION = "asuka-action-compiler-v1";
-export const PRIMARY_REVISION_PROMPT_VERSION = "asuka-primary-revision-v1";
+export const PRIMARY_REVISION_PROMPT_VERSION = "asuka-primary-revision-v2-zh";
 
 export const ACTION_COMPILER_SCHEMA = Object.freeze({
   type: "object",
@@ -332,9 +332,9 @@ export function primaryRevisionRequest({ requestContext, currentOutput, revision
       {
         role: "user",
         content: [
-          "Revise your inspectable cognition journal only to address these compiler gaps:",
+          "只针对以下编译缺口修订你的可审计思绪：",
           ...revisionReasons.map((reason) => `- ${reason}`),
-          "Keep it natural Markdown, preserve correct content, and include exact usable drafts and visible evidence IDs. Do not output JSON.",
+          "继续使用自然的简体中文 Markdown，保留原有正确内容，并补充可直接使用的完整草稿与可见证据 ID。不要输出 JSON，不要改用英文。",
         ].join("\n"),
       },
     ],

@@ -109,21 +109,7 @@ async function processBatch() {
           title = EXCLUDED.title,
           updated_at = GREATEST(conversations.updated_at, EXCLUDED.updated_at)
       `;
-      await tx`
-        INSERT INTO messages (
-          id, conversation_id, role, author_kind, direction, content,
-          sender_id, sender_display_name, reply_to_external_message_id,
-          external_message_id, external_receipt, citations_json,
-          correlation_id, read_at, created_at
-        ) VALUES (
-          ${delivery.id}, ${conversationId}, 'user', 'user', 'inbound',
-          ${content}, ${delivery.sender_id}, ${displayName}, ${replyTo},
-          ${delivery.external_message_id}, ${tx.json({})}, '[]'::jsonb,
-          ${correlationId}, NULL, ${messageTime}
-        )
-        ON CONFLICT (id) DO NOTHING
-      `;
-      await tx`
+      const participants = await tx`
         INSERT INTO conversation_participants (
           conversation_id, participant_id, display_name, aliases,
           first_seen_at, last_seen_at
@@ -132,7 +118,7 @@ async function processBatch() {
           ${tx.json([displayName])}, ${messageTime}, ${messageTime}
         )
         ON CONFLICT (conversation_id, participant_id) DO UPDATE SET
-          display_name = EXCLUDED.display_name,
+          display_name = conversation_participants.display_name,
           aliases = (
             SELECT jsonb_agg(alias ORDER BY alias)
             FROM (
@@ -149,6 +135,22 @@ async function processBatch() {
             conversation_participants.last_seen_at,
             EXCLUDED.last_seen_at
           )
+        RETURNING display_name
+      `;
+      const stableDisplayName = String(participants[0]?.display_name || displayName);
+      await tx`
+        INSERT INTO messages (
+          id, conversation_id, role, author_kind, direction, content,
+          sender_id, sender_display_name, reply_to_external_message_id,
+          external_message_id, external_receipt, citations_json,
+          correlation_id, read_at, created_at
+        ) VALUES (
+          ${delivery.id}, ${conversationId}, 'user', 'user', 'inbound',
+          ${content}, ${delivery.sender_id}, ${stableDisplayName}, ${replyTo},
+          ${delivery.external_message_id}, ${tx.json({})}, '[]'::jsonb,
+          ${correlationId}, NULL, ${messageTime}
+        )
+        ON CONFLICT (id) DO NOTHING
       `;
       await tx`
         INSERT INTO events (

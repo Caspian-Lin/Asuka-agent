@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  estimateChatTokens,
   projectThoughtContext,
   selectInitializationHistory,
+  shouldUseInitializationHistory,
   sourceToChatMessage,
   ThoughtContextError,
 } from "../src/thought-context.mjs";
@@ -11,6 +13,7 @@ import {
 function source(id, {
   authorKind = "user",
   senderId = "user-a",
+  senderDisplayName = senderId,
   at = `2026-07-16T00:${String(Number(id.replace(/\D/g, "") || 0)).padStart(2, "0")}:00Z`,
   content = `message ${id}`,
   conversationType = "group",
@@ -20,7 +23,7 @@ function source(id, {
     message_id: id,
     author_kind: authorKind,
     sender_id: senderId,
-    sender_display_name: senderId,
+    sender_display_name: senderDisplayName,
     reply_to: replyTo,
     sent_at: at,
     conversation_type: conversationType,
@@ -29,6 +32,25 @@ function source(id, {
 }
 
 const systemMessages = [{ role: "system", content: "You are Asuka. Stable prompt." }];
+
+test("token estimates include persisted tool-call arguments and result identity", () => {
+  const plain = estimateChatTokens([{ role: "assistant", content: null }]);
+  const withTools = estimateChatTokens([{
+    role: "assistant",
+    content: null,
+    tool_calls: [{
+      id: "call-1",
+      type: "function",
+      function: { name: "recall_memories", arguments: "{\"query\":\"露营计划\"}" },
+    }],
+  }, {
+    role: "tool",
+    tool_call_id: "call-1",
+    name: "recall_memories",
+    content: "{\"ok\":true}",
+  }]);
+  assert.ok(withTools > plain);
+});
 
 test("initialization history is the deduplicated union of last N and recent minutes", () => {
   const messages = [
@@ -49,9 +71,10 @@ test("initialization history is the deduplicated union of last N and recent minu
   );
 });
 
-test("user, Asuka, and private conversation roles stay explicit", () => {
+test("user messages prefer stable names while retaining auditable identity references", () => {
   const userMessage = sourceToChatMessage(source("m1", {
     conversationType: "private",
+    senderDisplayName: "小林",
   }));
   const agentMessage = sourceToChatMessage(source("m2", {
     authorKind: "agent",
@@ -59,11 +82,32 @@ test("user, Asuka, and private conversation roles stay explicit", () => {
     conversationType: "private",
   }));
   assert.equal(userMessage.role, "user");
-  assert.match(userMessage.content, /"conversation_type":"private"/);
-  assert.match(userMessage.content, /"sender_id":"user-a"/);
+  assert.match(userMessage.content, /说话人=小林/);
+  assert.match(userMessage.content, /身份引用=user-a/);
+  assert.match(userMessage.content, /消息引用=m1/);
+  assert.match(userMessage.content, /小林：message m1/);
+  assert.doesNotMatch(userMessage.content, /\{"message_id"/);
   assert.equal(agentMessage.role, "assistant");
-  assert.match(agentMessage.content, /Asuka previously said/);
-  assert.match(agentMessage.content, /"author_kind":"agent"/);
+  assert.match(agentMessage.content, /Asuka 之前的消息/);
+  assert.match(agentMessage.content, /Asuka：message m2/);
+});
+
+test("only the first epoch may bootstrap historical messages", () => {
+  assert.equal(shouldUseInitializationHistory({
+    epochOrdinal: 1,
+    committedTurnCount: 0,
+    hasCompression: false,
+  }), true);
+  assert.equal(shouldUseInitializationHistory({
+    epochOrdinal: 2,
+    committedTurnCount: 0,
+    hasCompression: false,
+  }), false);
+  assert.equal(shouldUseInitializationHistory({
+    epochOrdinal: 1,
+    committedTurnCount: 1,
+    hasCompression: false,
+  }), false);
 });
 
 test("conversation projections never mix sources and retain reply targets", () => {
@@ -103,6 +147,28 @@ test("projection keeps stable order and exact auditable context items", () => {
       thoughtRunId: "turn-1",
       turnOrdinal: 1,
       newMessages: [source("committed-1")],
+      toolTraceMessages: [{
+        callId: "call-1",
+        sequenceNumber: 1,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "tool-call-1",
+            type: "function",
+            function: { name: "recall_memories", arguments: "{\"query\":\"露营\"}" },
+          }],
+        },
+      }, {
+        callId: "call-1",
+        sequenceNumber: 1,
+        message: {
+          role: "tool",
+          tool_call_id: "tool-call-1",
+          name: "recall_memories",
+          content: "{\"ok\":true,\"memories\":[]}",
+        },
+      }],
       primaryOutput: "我还在等大家确认天气。",
       actionState: "no_action",
     }],
@@ -120,16 +186,33 @@ test("projection keeps stable order and exact auditable context items", () => {
   }).chunks[0];
 
   assert.deepEqual(projection.messages.map((message) => message.role), [
-    "system", "user", "user", "user", "assistant", "user", "user",
+    "system", "user", "user", "user", "assistant", "tool", "assistant", "user", "user",
   ]);
   assert.deepEqual(projection.contextItems.map((item) => item.metadata.section), [
     "compression",
     "initialization_history",
     "committed_turn",
     "committed_turn",
+    "committed_turn",
+    "committed_turn",
     "recalled_memory",
     "new_source",
   ]);
+  const committedMessage = projection.contextItems.find((item) => (
+    item.itemType === "message" && item.metadata.section === "committed_turn"
+  ));
+  assert.equal(committedMessage.metadata.thoughtRunId, "turn-1");
+  assert.equal(committedMessage.metadata.turnOrdinal, 1);
+  assert.deepEqual(projection.messages[4].tool_calls[0].function, {
+    name: "recall_memories",
+    arguments: "{\"query\":\"露营\"}",
+  });
+  assert.equal(projection.messages[5].content, "{\"ok\":true,\"memories\":[]}");
+  assert.deepEqual(
+    projection.contextItems.slice(3, 5).map((item) => item.itemType),
+    ["assistant_tool_call", "tool_result"],
+  );
+  assert.match(projection.messages[1].content, /上一上下文段摘要/);
   assert.equal(projection.newMessageStartId, "new-1");
   assert.equal(projection.newMessageEndId, "new-1");
 });

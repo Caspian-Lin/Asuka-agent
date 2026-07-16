@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { LlmConfigurationError } from "@asuka-agent/llm/runtime";
 import {
+  committedToolTraceMessages,
   cognitionError,
   cognitionTriggerReason,
   nextRunAt,
@@ -76,4 +77,41 @@ test("thought streams and epochs have stable conversation-scoped identities", ()
     thoughtEpochIdFor(stream, 1),
   );
   assert.notEqual(thoughtEpochIdFor(stream, 1), thoughtEpochIdFor(stream, 2));
+});
+
+test("committed tool calls rebuild exact assistant and tool messages for later Thoughts", () => {
+  const toolCalls = [{
+    id: "call-1",
+    type: "function",
+    function: { name: "recall_memories", arguments: "{\"query\":\"猫\"}" },
+  }];
+  assert.deepEqual(committedToolTraceMessages([{
+    id: "llm-call-1",
+    sequence_number: 3,
+    response_json: { content: "我先查一下。", toolCalls },
+    tool_results: [{
+      referenceId: "call-1",
+      content: "{\"ok\":true,\"memories\":[]}",
+      metadata: { toolName: "recall_memories" },
+    }],
+  }]), [{
+    callId: "llm-call-1",
+    sequenceNumber: 3,
+    message: { role: "assistant", content: "我先查一下。", tool_calls: toolCalls },
+  }, {
+    callId: "llm-call-1",
+    sequenceNumber: 3,
+    message: {
+      role: "tool",
+      tool_call_id: "call-1",
+      name: "recall_memories",
+      content: "{\"ok\":true,\"memories\":[]}",
+    },
+  }]);
+  assert.throws(() => committedToolTraceMessages([{
+    id: "llm-call-broken",
+    sequence_number: 4,
+    response_json: { toolCalls },
+    tool_results: [],
+  }]), /缺少工具 call-1 的返回记录/);
 });

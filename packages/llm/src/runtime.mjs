@@ -216,6 +216,29 @@ function structuredOutputMessages(baseUrl, responseSchema, messages) {
   ];
 }
 
+export function openAiCompatibleRequestPayload(configuration, request) {
+  const messages = structuredOutputMessages(
+    configuration.baseUrl,
+    request.responseSchema,
+    request.messages,
+  );
+  return {
+    model: configuration.modelId,
+    messages,
+    ...(Array.isArray(request.tools) && request.tools.length
+      ? { tools: request.tools }
+      : {}),
+    ...(request.toolChoice ? { tool_choice: request.toolChoice } : {}),
+    ...(request.maxOutputTokens
+      ? { max_tokens: request.maxOutputTokens }
+      : {}),
+    ...structuredOutputParameters(
+      configuration.baseUrl,
+      request.responseSchema,
+    ),
+  };
+}
+
 function redactProviderDetail(value) {
   if (typeof value !== "string") return null;
   const normalized = value
@@ -278,11 +301,8 @@ export class OpenAiCompatibleProvider {
     if (!configuration.apiKey) {
       throw new LlmConfigurationError("api_key_missing", `${profile} 模型缺少 API Key`, 503);
     }
-    const requestMessages = structuredOutputMessages(
-      configuration.baseUrl,
-      request.responseSchema,
-      request.messages,
-    );
+    const requestPayload = openAiCompatibleRequestPayload(configuration, request);
+    const requestMessages = requestPayload.messages;
     const startedAt = performance.now();
     let response;
     try {
@@ -294,21 +314,7 @@ export class OpenAiCompatibleProvider {
             Authorization: `Bearer ${configuration.apiKey}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            model: configuration.modelId,
-            messages: requestMessages,
-            ...(Array.isArray(request.tools) && request.tools.length
-              ? { tools: request.tools }
-              : {}),
-            ...(request.toolChoice ? { tool_choice: request.toolChoice } : {}),
-            ...(request.maxOutputTokens
-              ? { max_tokens: request.maxOutputTokens }
-              : {}),
-            ...structuredOutputParameters(
-              configuration.baseUrl,
-              request.responseSchema,
-            ),
-          }),
+          body: JSON.stringify(requestPayload),
           signal: AbortSignal.timeout(this.timeoutMs),
         },
       );
@@ -365,6 +371,7 @@ export class OpenAiCompatibleProvider {
         : undefined,
       latencyMs,
       requestMessages,
+      requestPayload,
     };
   }
 }
