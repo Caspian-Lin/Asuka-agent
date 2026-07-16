@@ -133,7 +133,7 @@ export default function AgentConsole() {
         </button>
         <button className="brand" onClick={() => setActiveView("channels")} aria-label="返回 IM Channel">
           <span className="brand-mark"><LuBot aria-hidden /></span>
-          <span><strong>Asuka</strong><small>Agent</small></span>
+          <span className="brand-copy"><strong>Asuka</strong><small>Agent</small></span>
         </button>
 
         <nav className="primary-nav" aria-label="主要导航">
@@ -147,19 +147,23 @@ export default function AgentConsole() {
                 aria-current={activeView === item.key ? "page" : undefined}
                 title={item.label}
               >
-                <span><Icon aria-hidden /></span>{item.label}
+                <span className="nav-icon"><Icon aria-hidden /></span>
+                <span className="nav-label">{item.label}</span>
               </button>
             );
           })}
         </nav>
 
-        <div className="rail-note database-note">
-          <div className="rail-note-head"><span>唯一数据源</span><strong>PostgreSQL</strong></div>
-          <p>QQ 消息、思绪、模型调用和记忆候选统一持久化。</p>
+        <div className="rail-note database-note" role="note" aria-label="唯一数据源：PostgreSQL">
+          <LuDatabase className="rail-note-icon" aria-hidden />
+          <div className="rail-note-content">
+            <div className="rail-note-head"><span>唯一数据源</span><strong>PostgreSQL</strong></div>
+            <p>QQ 消息、思绪、模型调用和记忆候选统一持久化。</p>
+          </div>
         </div>
       </aside>
 
-      <section className="workbench">
+      <section className={`workbench${activeView === "thoughts" ? " thought-workbench" : ""}`}>
         <nav className="mobile-nav" aria-label="移动端导航">
           {navItems.map((item) => {
             const Icon = item.icon;

@@ -103,3 +103,19 @@ test("thought audit badge tones cannot collide with Tailwind utility classes", a
   assert.match(css, /\.audit-badge-tone-fixed\s*{/);
   assert.doesNotMatch(css, /\.audit-badge\.fixed\s*{/);
 });
+
+test("thought workspace owns viewport height and the inspector can fill the screen", async () => {
+  const [component, css] = await Promise.all([
+    readFile(new URL("components/thought-runs-page.tsx", appRoot), "utf8"),
+    readFile(new URL("globals.css", appRoot), "utf8"),
+  ]);
+
+  assert.match(component, /inspectorFullscreen/);
+  assert.match(component, /event\.key === "Escape"/);
+  assert.match(component, /"退出全屏" : "全屏显示"/);
+  assert.match(component, /aria-pressed={inspectorFullscreen}/);
+  assert.match(css, /\.thought-workbench\s*{[^}]*overflow: hidden;[^}]*height: 100svh;/s);
+  assert.match(css, /\.thought-runs-page\s*{[^}]*overflow: hidden;[^}]*height: 100%;[^}]*min-height: 0;/s);
+  assert.match(css, /\.thought-run-list\s*{[^}]*overflow-y: auto;/s);
+  assert.match(css, /\.thought-inspector\.is-fullscreen\s*{[^}]*position: fixed;[^}]*inset: 0;[^}]*height: 100svh;/s);
+});

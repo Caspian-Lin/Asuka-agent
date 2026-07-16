@@ -6,7 +6,9 @@ import {
   LuChevronRight,
   LuCircle,
   LuListTree,
+  LuMaximize2,
   LuMessageSquareText,
+  LuMinimize2,
   LuRefreshCw,
   LuShieldCheck,
   LuWrench,
@@ -742,6 +744,7 @@ export default function ThoughtRunsPage({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [resettingConversationId, setResettingConversationId] = useState<string | null>(null);
+  const [inspectorFullscreen, setInspectorFullscreen] = useState(false);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -789,6 +792,23 @@ export default function ThoughtRunsPage({
     const timer = window.setTimeout(() => void loadDetail(selectedId), 0);
     return () => window.clearTimeout(timer);
   }, [loadDetail, selectedId]);
+
+  useEffect(() => {
+    if (!inspectorFullscreen) return;
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousRootOverflow = document.documentElement.style.overflow;
+    const exitOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setInspectorFullscreen(false);
+    };
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    window.addEventListener("keydown", exitOnEscape);
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousRootOverflow;
+      window.removeEventListener("keydown", exitOnEscape);
+    };
+  }, [inspectorFullscreen]);
 
   async function resetContext(conversationId: string, conversationTitle: string) {
     const confirmed = window.confirm(
@@ -923,7 +943,11 @@ export default function ThoughtRunsPage({
             })}
           </div>
 
-          <aside className="thought-inspector" aria-live="polite">
+          <aside
+            className={`thought-inspector${inspectorFullscreen ? " is-fullscreen" : ""}`}
+            aria-live="polite"
+            aria-label={inspectorFullscreen ? "全屏思绪详情" : "思绪详情"}
+          >
             {!detail || detail.run.id !== selectedId ? (
               <div className="run-loading"><i /><i /><i /></div>
             ) : (
@@ -941,17 +965,28 @@ export default function ThoughtRunsPage({
                   </div>
                   <div className="inspector-actions">
                     <span className={`run-state state-${detail.run.status}`}>{stateLabel(detail.run.status)}</span>
-                    <button
-                      className="context-reset-button"
-                      disabled={resettingConversationId === detail.run.conversation_id}
-                      onClick={() => void resetContext(
-                        detail.run.conversation_id,
-                        detail.run.conversation_title,
-                      )}
-                    >
-                      <LuRefreshCw aria-hidden />
-                      {resettingConversationId === detail.run.conversation_id ? "正在重置" : "重置上下文"}
-                    </button>
+                    <div className="inspector-action-buttons">
+                      <button
+                        className="inspector-fullscreen-button"
+                        onClick={() => setInspectorFullscreen((current) => !current)}
+                        aria-pressed={inspectorFullscreen}
+                        title={inspectorFullscreen ? "退出全屏显示（Esc）" : "全屏显示思绪详情"}
+                      >
+                        {inspectorFullscreen ? <LuMinimize2 aria-hidden /> : <LuMaximize2 aria-hidden />}
+                        {inspectorFullscreen ? "退出全屏" : "全屏显示"}
+                      </button>
+                      <button
+                        className="context-reset-button"
+                        disabled={resettingConversationId === detail.run.conversation_id}
+                        onClick={() => void resetContext(
+                          detail.run.conversation_id,
+                          detail.run.conversation_title,
+                        )}
+                      >
+                        <LuRefreshCw aria-hidden />
+                        {resettingConversationId === detail.run.conversation_id ? "正在重置" : "重置上下文"}
+                      </button>
+                    </div>
                   </div>
                 </header>
                 <div className="thought-inspector-body">
