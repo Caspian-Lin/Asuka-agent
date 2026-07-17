@@ -17,6 +17,11 @@ const compressionSnapshotUrl = new URL("../drizzle-pg/meta/0010_snapshot.json", 
 const compressionMigrationUrl = new URL("../drizzle-pg/0010_brief_hulk.sql", import.meta.url);
 const memorySnapshotUrl = new URL("../drizzle-pg/meta/0011_snapshot.json", import.meta.url);
 const memoryMigrationUrl = new URL("../drizzle-pg/0011_boring_justice.sql", import.meta.url);
+const schedulerSnapshotUrl = new URL("../drizzle-pg/meta/0012_snapshot.json", import.meta.url);
+const schedulerMigrationUrl = new URL(
+  "../drizzle-pg/0012_regular_wendell_rand.sql",
+  import.meta.url,
+);
 
 test("thought stream migration exposes the recoverable v2 contracts", async () => {
   const snapshot = JSON.parse(await readFile(snapshotUrl, "utf8"));
@@ -134,4 +139,17 @@ test("global memory proposals and retrieval decisions remain auditable", async (
     migration,
     /\b(?:UPDATE|INSERT INTO)\s+"?(?:memory_candidates|thought_runs)"?/i,
   );
+});
+
+test("manual scheduler scope is durable and only cognition seeds become configurable", async () => {
+  const snapshot = JSON.parse(await readFile(schedulerSnapshotUrl, "utf8"));
+  const parameters = snapshot.tables["public.job_runs"].columns.parameters;
+  assert.equal(parameters.notNull, true);
+  assert.equal(parameters.default, "'{}'::jsonb");
+
+  const migration = await readFile(schedulerMigrationUrl, "utf8");
+  assert.match(migration, /"job_type" = 'thought_tick'/);
+  assert.match(migration, /"job_type" = 'memory_consolidation'/);
+  assert.match(migration, /"job_type" NOT IN \('thought_tick', 'memory_consolidation'\)/);
+  assert.doesNotMatch(migration, /"job_type" = '(?:qq_ingress|inbound_projection)'/);
 });

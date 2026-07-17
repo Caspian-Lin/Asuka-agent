@@ -132,26 +132,86 @@ const jobsRepository = {
   },
   async getJob(jobId) {
     const rows = await sql`
-      SELECT id, job_type, enabled, status, config
+      SELECT id, job_type, schedule_type, schedule_expression, timezone,
+             configurable, enabled, status, config, next_run_at
       FROM jobs
       WHERE id = ${jobId} AND agent_id = 'agent-asuka'
       LIMIT 1
     `;
     return rows[0] ?? null;
   },
+  async getConversation(conversationId) {
+    const rows = await sql`
+      SELECT id, title
+      FROM conversations
+      WHERE id = ${conversationId}
+        AND agent_id = 'agent-asuka'
+        AND channel = 'napcat'
+        AND status = 'active'
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  },
+  listConversations() {
+    return sql`
+      SELECT conversation.id, conversation.title, conversation.external_id,
+             conversation.updated_at,
+             count(message.id) FILTER (
+               WHERE message.author_kind = 'user'
+                 AND message.direction = 'inbound'
+                 AND (
+                   stream.committed_message_at IS NULL
+                   OR (message.created_at, message.id) > (
+                     stream.committed_message_at,
+                     stream.committed_message_id
+                   )
+                 )
+             )::int AS thought_unread_count,
+             max(message.created_at) AS last_message_at
+      FROM conversations AS conversation
+      LEFT JOIN messages AS message ON message.conversation_id = conversation.id
+      LEFT JOIN thought_streams AS stream
+        ON stream.agent_id = conversation.agent_id
+       AND stream.conversation_id = conversation.id
+       AND stream.status = 'active'
+      WHERE conversation.agent_id = 'agent-asuka'
+        AND conversation.channel = 'napcat'
+        AND conversation.status = 'active'
+      GROUP BY conversation.id
+      ORDER BY last_message_at DESC NULLS LAST, conversation.updated_at DESC
+    `;
+  },
+  async updateJob(jobId, input) {
+    const rows = await sql`
+      UPDATE jobs
+      SET schedule_type = ${input.scheduleType},
+          schedule_expression = ${input.scheduleExpression},
+          timezone = ${input.timezone},
+          enabled = ${input.enabled},
+          status = ${input.status},
+          config = ${sql.json(input.config)},
+          next_run_at = ${input.nextRunAt},
+          updated_at = now()
+      WHERE id = ${jobId} AND agent_id = 'agent-asuka'
+      RETURNING id, job_type, name, description, schedule_type,
+                schedule_expression, timezone, configurable, enabled,
+                status, config, last_run_at, next_run_at, updated_at
+    `;
+    return rows[0];
+  },
   async enqueue(input) {
     const rows = await sql`
       INSERT INTO job_runs (
         id, job_id, status, trigger_type, idempotency_key, correlation_id,
         scheduled_for, available_at, attempt_count, max_attempts,
-        started_at, completed_at, metrics, created_at
+        parameters, started_at, completed_at, metrics, created_at
       ) VALUES (
         ${input.id}, ${input.jobId}, 'queued', 'manual',
         ${input.idempotencyKey}, ${input.correlationId}, ${input.now},
-        ${input.now}, 0, ${input.maxAttempts}, NULL, NULL,
+        ${input.now}, 0, ${input.maxAttempts}, ${sql.json(input.parameters)}, NULL, NULL,
         ${sql.json({})}, ${input.now}
       )
-      RETURNING id, job_id, status, trigger_type, correlation_id, created_at
+      RETURNING id, job_id, status, trigger_type, correlation_id, parameters, created_at
     `;
     return rows[0];
   },
@@ -160,7 +220,7 @@ const jobsRepository = {
       SELECT id, job_id, status, trigger_type, correlation_id, scheduled_for,
              available_at, attempt_count, max_attempts, lease_owner,
              lease_expires_at, heartbeat_at, started_at, completed_at,
-             error_code, error_message, metrics, created_at
+             error_code, error_message, parameters, metrics, created_at
       FROM job_runs
       WHERE job_id = ${jobId}
       ORDER BY created_at DESC
@@ -174,7 +234,8 @@ const jobsRepository = {
              run.scheduled_for, run.available_at, run.attempt_count,
              run.max_attempts, run.lease_owner, run.lease_expires_at,
              run.heartbeat_at, run.started_at, run.completed_at,
-             run.error_code, run.error_message, run.metrics, run.created_at
+             run.error_code, run.error_message, run.parameters, run.metrics,
+             run.created_at
       FROM job_runs AS run
       JOIN jobs AS job ON job.id = run.job_id
       WHERE run.id = ${runId} AND job.agent_id = 'agent-asuka'
@@ -912,6 +973,15 @@ const server = http.createServer(async (request, response) => {
       sendJson(response, 200, { jobs: await jobsService.listJobs() }, origin);
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/jobs/conversations") {
+      sendJson(
+        response,
+        200,
+        { conversations: await jobsService.listConversations() },
+        origin,
+      );
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/outbound") {
       sendJson(response, 200, await outboundService.snapshot(), origin);
       return;
@@ -991,7 +1061,27 @@ const server = http.createServer(async (request, response) => {
       sendJson(
         response,
         202,
-        { run: await jobsService.trigger(decodeURIComponent(jobTriggerRoute[1])) },
+        {
+          run: await jobsService.trigger(
+            decodeURIComponent(jobTriggerRoute[1]),
+            await readJson(request),
+          ),
+        },
+        origin,
+      );
+      return;
+    }
+    const jobUpdateRoute = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
+    if (jobUpdateRoute && request.method === "PUT") {
+      sendJson(
+        response,
+        200,
+        {
+          job: await jobsService.update(
+            decodeURIComponent(jobUpdateRoute[1]),
+            await readJson(request),
+          ),
+        },
         origin,
       );
       return;

@@ -1,14 +1,24 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   LuCalendarClock,
+  LuCheck,
   LuCircle,
   LuEye,
   LuPlay,
+  LuSettings2,
+  LuX,
 } from "react-icons/lu";
 import { controlRequest } from "./control-api";
-import { canManuallyRunJob, formatJobMetrics } from "./jobs-view";
+import {
+  canEditJobConfig,
+  canManuallyRunJob,
+  formatJobMetrics,
+  formatRunScope,
+  jobConfigDraft,
+  type JobConfigDraft,
+} from "./jobs-view";
 
 type RunMetrics = {
   deliveryCount?: number;
@@ -30,6 +40,7 @@ type Job = {
   configurable: boolean;
   enabled: boolean;
   status: "active" | "planned" | "disabled";
+  config: Record<string, unknown>;
   last_run_at: string | null;
   next_run_at: string | null;
   latest_run_id: string | null;
@@ -61,8 +72,17 @@ type JobRun = {
   completed_at: string | null;
   error_code: string | null;
   error_message: string | null;
+  parameters: { conversationId?: string };
   metrics: RunMetrics;
   created_at: string;
+};
+
+type JobConversation = {
+  id: string;
+  title: string;
+  external_id: string | null;
+  thought_unread_count: number;
+  last_message_at: string | null;
 };
 
 type RunDetail = {
@@ -143,6 +163,13 @@ export default function JobsPage() {
   const [loading, setLoading] = useState(true);
   const [runsLoading, setRunsLoading] = useState(false);
   const [busyJobId, setBusyJobId] = useState<string | null>(null);
+  const [savingJobId, setSavingJobId] = useState<string | null>(null);
+  const [editingJobId, setEditingJobId] = useState<string | null>(null);
+  const [configDraft, setConfigDraft] = useState<JobConfigDraft | null>(null);
+  const [runTargetJobId, setRunTargetJobId] = useState<string | null>(null);
+  const [targetConversationId, setTargetConversationId] = useState("");
+  const [conversations, setConversations] = useState<JobConversation[]>([]);
+  const [conversationsLoading, setConversationsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -158,6 +185,20 @@ export default function JobsPage() {
       setError(reason instanceof Error ? reason.message : "任务数据载入失败");
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  const loadConversations = useCallback(async () => {
+    setConversationsLoading(true);
+    try {
+      const payload = await controlRequest<{ conversations: JobConversation[] }>(
+        "/api/jobs/conversations",
+      );
+      setConversations(payload.conversations);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "会话列表载入失败");
+    } finally {
+      setConversationsLoading(false);
     }
   }, []);
 
@@ -191,13 +232,19 @@ export default function JobsPage() {
   }, []);
 
   useEffect(() => {
-    const initial = window.setTimeout(() => void loadJobs(), 0);
-    const timer = window.setInterval(() => void loadJobs(), 10_000);
+    const initial = window.setTimeout(() => {
+      void loadJobs();
+      void loadConversations();
+    }, 0);
+    const timer = window.setInterval(() => {
+      void loadJobs();
+      void loadConversations();
+    }, 10_000);
     return () => {
       window.clearTimeout(initial);
       window.clearInterval(timer);
     };
-  }, [loadJobs]);
+  }, [loadConversations, loadJobs]);
 
   useEffect(() => {
     if (!selectedJobId) return;
@@ -221,23 +268,85 @@ export default function JobsPage() {
   );
   const activeCount = jobs.filter((job) => job.status === "active").length;
 
-  async function trigger(job: Job) {
+  async function trigger(job: Job, conversationId?: string | null) {
     setBusyJobId(job.id);
     setNotice(null);
+    setError(null);
     try {
       const payload = await controlRequest<{ run: JobRun }>(
         `/api/jobs/${encodeURIComponent(job.id)}/run`,
-        { method: "POST" },
+        {
+          method: "POST",
+          body: JSON.stringify(conversationId ? { conversationId } : {}),
+        },
       );
       setSelectedJobId(job.id);
       await loadRuns(job.id, payload.run.id);
-      setNotice(`${job.name}已进入队列，worker 会按租约安全领取。`);
+      const scope = formatRunScope(
+        conversationId ? { conversationId } : {},
+        conversations,
+      );
+      setNotice(`${job.name}已进入队列，本次范围：${scope}。`);
+      setRunTargetJobId(null);
       await loadJobs();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "手动触发失败");
     } finally {
       setBusyJobId(null);
     }
+  }
+
+  function beginEdit(job: Job) {
+    setEditingJobId(job.id);
+    setConfigDraft(jobConfigDraft(job));
+    setRunTargetJobId(null);
+    setError(null);
+    setNotice(null);
+  }
+
+  async function saveJob(event: FormEvent<HTMLFormElement>, job: Job) {
+    event.preventDefault();
+    if (!configDraft) return;
+    setSavingJobId(job.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await controlRequest<{ job: Job }>(
+        `/api/jobs/${encodeURIComponent(job.id)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            enabled: configDraft.enabled,
+            schedule: job.job_type === "thought_tick"
+              ? { intervalMinutes: configDraft.intervalMinutes }
+              : { dailyTime: configDraft.dailyTime },
+            limits: {
+              maxBatchMessages: configDraft.maxBatchMessages,
+              maxAttempts: configDraft.maxAttempts,
+            },
+          }),
+        },
+      );
+      setEditingJobId(null);
+      setConfigDraft(null);
+      setNotice(`${job.name}配置已保存，下一次执行时间已重新计算。`);
+      await loadJobs();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "任务配置保存失败");
+    } finally {
+      setSavingJobId(null);
+    }
+  }
+
+  function openRunScope(job: Job) {
+    setSelectedJobId(job.id);
+    setRunTargetJobId(job.id);
+    setTargetConversationId("");
+    setEditingJobId(null);
+    setConfigDraft(null);
+    setError(null);
+    setNotice(null);
+    void loadConversations();
   }
 
   return (
@@ -281,12 +390,179 @@ export default function JobsPage() {
                     <div><dt>处理范围</dt><dd>{formatJobMetrics(job.latest_run_metrics)}</dd></div>
                     <div><dt>失败原因</dt><dd className={job.latest_run_error_code ? "error-copy" : ""}>{job.latest_run_error_code ?? "—"}</dd></div>
                   </dl>
+                  {editingJobId === job.id && configDraft && (
+                    <form className="job-config-editor" onSubmit={(event) => void saveJob(event, job)}>
+                      <header>
+                        <div>
+                          <strong>编辑任务配置</strong>
+                          <span>仅开放可安全校验的调度与运行限制。</span>
+                        </div>
+                        <button
+                          className="icon-button"
+                          type="button"
+                          aria-label="关闭配置编辑"
+                          onClick={() => {
+                            setEditingJobId(null);
+                            setConfigDraft(null);
+                          }}
+                        >
+                          <LuX aria-hidden />
+                        </button>
+                      </header>
+                      <fieldset disabled={savingJobId === job.id}>
+                        <label className="job-enabled-control">
+                          <input
+                            type="checkbox"
+                            checked={configDraft.enabled}
+                            onChange={(event) => setConfigDraft({
+                              ...configDraft,
+                              enabled: event.target.checked,
+                            })}
+                          />
+                          <span><strong>启用自动计划</strong><small>停用后不会生成新的定时 Run。</small></span>
+                        </label>
+                        <div className="job-config-grid">
+                          {job.job_type === "thought_tick" ? (
+                            <label>
+                              <span>执行间隔</span>
+                              <div className="input-with-unit">
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="1440"
+                                  required
+                                  value={configDraft.intervalMinutes}
+                                  onChange={(event) => setConfigDraft({
+                                    ...configDraft,
+                                    intervalMinutes: Number(event.target.value),
+                                  })}
+                                />
+                                <small>分钟</small>
+                              </div>
+                            </label>
+                          ) : (
+                            <label>
+                              <span>每日执行时间</span>
+                              <input
+                                type="time"
+                                required
+                                value={configDraft.dailyTime}
+                                onChange={(event) => setConfigDraft({
+                                  ...configDraft,
+                                  dailyTime: event.target.value,
+                                })}
+                              />
+                            </label>
+                          )}
+                          <label>
+                            <span>单会话最大消息数</span>
+                            <input
+                              type="number"
+                              min="1"
+                              max="1000"
+                              required
+                              value={configDraft.maxBatchMessages}
+                              onChange={(event) => setConfigDraft({
+                                ...configDraft,
+                                maxBatchMessages: Number(event.target.value),
+                              })}
+                            />
+                          </label>
+                          <label>
+                            <span>最大尝试次数</span>
+                            <input
+                              type="number"
+                              min="1"
+                              max="10"
+                              required
+                              value={configDraft.maxAttempts}
+                              onChange={(event) => setConfigDraft({
+                                ...configDraft,
+                                maxAttempts: Number(event.target.value),
+                              })}
+                            />
+                          </label>
+                        </div>
+                      </fieldset>
+                      <div className="job-config-actions">
+                        <span>时区固定为 {job.timezone}；保存后重新计算下次执行时间。</span>
+                        <button className="primary-button" type="submit" disabled={savingJobId === job.id}>
+                          <LuCheck aria-hidden />{savingJobId === job.id ? "保存中…" : "保存配置"}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                  {runTargetJobId === job.id && job.job_type === "thought_tick" && (
+                    <form
+                      className="job-run-scope"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void trigger(job, targetConversationId || null);
+                      }}
+                    >
+                      <header>
+                        <div><strong>选择本次整理范围</strong><span>一次性选择不会修改自动计划。</span></div>
+                        <button className="icon-button" type="button" aria-label="关闭运行范围选择" onClick={() => setRunTargetJobId(null)}>
+                          <LuX aria-hidden />
+                        </button>
+                      </header>
+                      <label>
+                        <span>目标会话</span>
+                        <select
+                          value={targetConversationId}
+                          disabled={conversationsLoading || busyJobId === job.id}
+                          onChange={(event) => setTargetConversationId(event.target.value)}
+                        >
+                          <option value="">全部有新增消息的会话</option>
+                          {conversations.map((conversation) => (
+                            <option value={conversation.id} key={conversation.id}>
+                              {conversation.title} · {conversation.thought_unread_count > 0
+                                ? `${conversation.thought_unread_count} 条待整理`
+                                : "当前无新增消息"}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="job-run-scope-actions">
+                        <span>{targetConversationId
+                          ? "即使该会话没有新增消息，也会留下成功且处理量为 0 的审计记录。"
+                          : "只会处理当前存在新增消息的活跃 NapCat 会话。"}</span>
+                        <button className="primary-button" type="submit" disabled={conversationsLoading || busyJobId === job.id}>
+                          <LuPlay aria-hidden />{busyJobId === job.id ? "入队中…" : "确认立即运行"}
+                        </button>
+                      </div>
+                    </form>
+                  )}
                   <footer>
-                    <span>{job.configurable ? "配置入口尚未开放" : "系统托管计划"} · {job.timezone}</span>
+                    <span>{canEditJobConfig(job) ? "可编辑认知计划" : "系统托管计划"} · {job.timezone}</span>
                     <div>
                       <button className="ghost-button" type="button" onClick={() => setSelectedJobId(job.id)}><LuEye aria-hidden />查看 runs</button>
+                      {canEditJobConfig(job) && (
+                        <button
+                          className="ghost-button"
+                          type="button"
+                          aria-expanded={editingJobId === job.id}
+                          onClick={() => {
+                            if (editingJobId === job.id) {
+                              setEditingJobId(null);
+                              setConfigDraft(null);
+                            } else {
+                              beginEdit(job);
+                            }
+                          }}
+                        >
+                          <LuSettings2 aria-hidden />配置
+                        </button>
+                      )}
                       {canManuallyRunJob(job) && (
-                        <button className="primary-button" type="button" disabled={busyJobId === job.id} onClick={() => void trigger(job)}>
+                        <button
+                          className="primary-button"
+                          type="button"
+                          disabled={busyJobId === job.id}
+                          onClick={() => job.job_type === "thought_tick"
+                            ? openRunScope(job)
+                            : void trigger(job)}
+                        >
                           <LuPlay aria-hidden />{busyJobId === job.id ? "入队中…" : "立即运行"}
                         </button>
                       )}
@@ -323,6 +599,7 @@ export default function JobsPage() {
                   <div className="run-detail">
                     <dl className="run-facts">
                       <div><dt>触发</dt><dd>{runDetail.run.trigger_type === "manual" ? "手动" : "定时"}</dd></div>
+                      <div><dt>本次范围</dt><dd>{formatRunScope(runDetail.run.parameters, conversations)}</dd></div>
                       <div><dt>尝试</dt><dd>{runDetail.run.attempt_count} / {runDetail.run.max_attempts}</dd></div>
                       <div><dt>开始</dt><dd>{formatDateTime(runDetail.run.started_at, "等待 worker")}</dd></div>
                       <div><dt>结束</dt><dd>{formatDateTime(runDetail.run.completed_at, "尚未结束")}</dd></div>

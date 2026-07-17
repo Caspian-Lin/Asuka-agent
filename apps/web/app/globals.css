@@ -4096,6 +4096,173 @@ textarea:focus-visible {
   color: var(--danger);
 }
 
+.job-config-editor,
+.job-run-scope {
+  padding: var(--space-4);
+  border-top: 1px solid var(--line);
+  background: var(--accent-wash);
+}
+
+.job-config-editor > header,
+.job-run-scope > header,
+.job-config-actions,
+.job-run-scope-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.job-config-editor > header > div,
+.job-run-scope > header > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.job-config-editor > header strong,
+.job-run-scope > header strong {
+  font-size: var(--type-primary-body);
+}
+
+.job-config-editor > header span,
+.job-run-scope > header span,
+.job-config-actions > span,
+.job-run-scope-actions > span {
+  color: var(--muted);
+  font-size: var(--type-secondary-body);
+  line-height: 1.5;
+}
+
+.job-config-editor .icon-button,
+.job-run-scope .icon-button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--paper);
+  color: var(--muted);
+}
+
+.job-config-editor .icon-button:hover,
+.job-run-scope .icon-button:hover {
+  border-color: var(--accent-strong);
+  color: var(--accent-strong);
+}
+
+.job-config-editor fieldset {
+  min-width: 0;
+  margin: var(--space-4) 0 0;
+  padding: var(--space-0);
+  border: 0;
+}
+
+.job-enabled-control {
+  display: flex;
+  width: fit-content;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.job-enabled-control input {
+  width: 17px;
+  height: 17px;
+  margin: 2px 0 0;
+  accent-color: var(--accent-strong);
+}
+
+.job-enabled-control > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.job-enabled-control strong,
+.job-enabled-control small {
+  font-size: var(--type-secondary-body);
+}
+
+.job-enabled-control small {
+  color: var(--muted);
+  font-weight: var(--weight-regular);
+}
+
+.job-config-grid {
+  display: grid;
+  margin-top: var(--space-4);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.job-config-grid > label,
+.job-run-scope > label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--type-secondary-body);
+  font-weight: var(--weight-semibold);
+}
+
+.job-config-grid input,
+.job-run-scope select {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.job-run-scope select {
+  font: inherit;
+}
+
+.job-run-scope select:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.input-with-unit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.input-with-unit small {
+  color: var(--muted);
+  font-size: var(--type-secondary-body);
+}
+
+.job-config-actions,
+.job-run-scope-actions {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+}
+
+.job-config-actions .primary-button,
+.job-run-scope-actions .primary-button {
+  display: inline-flex;
+  min-height: 38px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: var(--space-2) var(--space-3);
+}
+
+.job-run-scope > label {
+  margin-top: var(--space-4);
+}
+
 .job-row footer {
   display: flex;
   min-height: 52px;
@@ -4487,7 +4654,22 @@ textarea:focus-visible {
 
   .job-row footer > div {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  }
+
+  .job-config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .job-config-actions,
+  .job-run-scope-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .job-config-actions .primary-button,
+  .job-run-scope-actions .primary-button {
+    width: 100%;
   }
 
   .run-facts {

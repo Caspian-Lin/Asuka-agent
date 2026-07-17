@@ -26,3 +26,47 @@ export function canManuallyRunJob(job: {
   return job.enabled && job.status === "active" &&
     ["thought_tick", "memory_consolidation"].includes(job.job_type);
 }
+
+export function canEditJobConfig(job: {
+  configurable: boolean;
+  job_type: string;
+}) {
+  return job.configurable &&
+    ["thought_tick", "memory_consolidation"].includes(job.job_type);
+}
+
+export type JobConfigDraft = {
+  enabled: boolean;
+  intervalMinutes: number;
+  dailyTime: string;
+  maxBatchMessages: number;
+  maxAttempts: number;
+};
+
+export function jobConfigDraft(job: {
+  job_type: string;
+  enabled: boolean;
+  config?: Record<string, unknown> | null;
+}): JobConfigDraft {
+  const config = job.config ?? {};
+  const dailyHour = Number(config.dailyHour ?? 3);
+  const dailyMinute = Number(config.dailyMinute ?? 0);
+  return {
+    enabled: job.enabled,
+    intervalMinutes: Math.max(1, Math.round(Number(config.intervalSeconds ?? 900) / 60)),
+    dailyTime: `${String(dailyHour).padStart(2, "0")}:${String(dailyMinute).padStart(2, "0")}`,
+    maxBatchMessages: Number(config.maxBatchMessages ?? config.maxMessages ??
+      (job.job_type === "thought_tick" ? 50 : 100)),
+    maxAttempts: Number(config.maxAttempts ?? 3),
+  };
+}
+
+export function formatRunScope(
+  parameters?: { conversationId?: string } | null,
+  conversations: Array<{ id: string; title: string }> = [],
+) {
+  const conversationId = parameters?.conversationId;
+  if (!conversationId) return "所有有新增消息的会话";
+  const conversation = conversations.find((item) => item.id === conversationId);
+  return conversation?.title ?? `会话 ${conversationId}`;
+}

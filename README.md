@@ -45,7 +45,7 @@ openssl rand -base64 32
 
 将结果填入 `.env`，随后执行 `make db-migrate`。设置页只显示 Key 是否已配置，不会回填明文。
 
-定时思绪先使用 `primary` 生成自然思绪，再由 `fast` 编译动作；夜间记忆沉淀仍使用 `primary` 档。两档需在设置页分别保存并启用。任务可在“定时任务”页面手动入队，运行详情会显示重试、模型审计、结构化结果和会话 watermark。“思绪”页面按一次完整认知过程展示触发原因与每轮调用；“记忆”页面当前只展示待审候选，正式激活与召回尚未实现。详细协议见 [`docs/scheduled-cognition.md`](docs/scheduled-cognition.md)。
+定时思绪先使用 `primary` 生成自然思绪，再由 `fast` 编译动作；夜间记忆沉淀仍使用 `primary` 档。两档需在设置页分别保存并启用。“定时任务”页面可编辑认知任务的启停、时间和运行限制；立即运行定时思绪时还可只选择一个会话，本次范围会随 Run 留在 PostgreSQL 审计中。运行详情会显示重试、模型审计、结构化结果和会话 watermark。“思绪”页面按一次完整认知过程展示触发原因与每轮调用；“记忆”页面当前只展示待审候选，正式审核激活尚未实现，召回端口只读取显式 active 且通过披露过滤的记录。详细协议见 [`docs/scheduled-cognition.md`](docs/scheduled-cognition.md)。
 
 自主发言默认 `总开关关闭 + shadow`。先在“自主发言”页面观察模型本来会说什么及硬策略原因；只有显式打开总开关并切换为“真实发送”，通过全部检查的白名单会话才会进入 NapCat 出站队列。发送前先持久化本地消息，NapCat 用 `echo` 返回明确成功后才标记送达；响应丢失会进入 `failed_uncertain` 且不自动重发。协议见 [`docs/autonomous-speech.md`](docs/autonomous-speech.md)。
 
