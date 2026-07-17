@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { enforceMemorySensitivity } from "./memory-proposal.mjs";
+
 export const ACTION_COMPILER_PROMPT_VERSION = "asuka-action-compiler-v1";
 export const PRIMARY_REVISION_PROMPT_VERSION = "asuka-primary-revision-v2-zh";
 
@@ -296,7 +298,9 @@ export function validateCompilerOutput(output, input) {
       subjectId,
       sourceSpeakerId,
       evidenceReferences,
-      sensitivity,
+      sensitivity: type === "memory"
+        ? enforceMemorySensitivity(content, sensitivity)
+        : sensitivity,
     };
   });
   return { status: "accepted", revisionReasons: [], actions };

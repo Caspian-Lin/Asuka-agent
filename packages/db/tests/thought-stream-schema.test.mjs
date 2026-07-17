@@ -15,6 +15,8 @@ const outboundSnapshotUrl = new URL("../drizzle-pg/meta/0009_snapshot.json", imp
 const outboundMigrationUrl = new URL("../drizzle-pg/0009_famous_legion.sql", import.meta.url);
 const compressionSnapshotUrl = new URL("../drizzle-pg/meta/0010_snapshot.json", import.meta.url);
 const compressionMigrationUrl = new URL("../drizzle-pg/0010_brief_hulk.sql", import.meta.url);
+const memorySnapshotUrl = new URL("../drizzle-pg/meta/0011_snapshot.json", import.meta.url);
+const memoryMigrationUrl = new URL("../drizzle-pg/0011_boring_justice.sql", import.meta.url);
 
 test("thought stream migration exposes the recoverable v2 contracts", async () => {
   const snapshot = JSON.parse(await readFile(snapshotUrl, "utf8"));
@@ -108,4 +110,28 @@ test("compression records provider cache usage without migrating old thought dat
   );
   const migration = await readFile(compressionMigrationUrl, "utf8");
   assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO)\s+"?(?:llm_calls|thought_stream_epochs)"?/i);
+});
+
+test("global memory proposals and retrieval decisions remain auditable", async () => {
+  const snapshot = JSON.parse(await readFile(memorySnapshotUrl, "utf8"));
+  const tables = snapshot.tables;
+  const candidate = tables["public.memory_candidates"];
+  const audit = tables["public.memory_retrieval_audits"];
+  const item = tables["public.memory_retrieval_items"];
+
+  assert.ok(audit);
+  assert.ok(item);
+  assert.equal(candidate.columns.sensitivity.notNull, true);
+  assert.equal(candidate.columns.disclosure_policy.notNull, true);
+  assert.equal(candidate.columns.diff.notNull, true);
+  assert.ok(candidate.indexes.memory_candidates_agent_subject_idx);
+  assert.equal(audit.columns.thought_run_id.notNull, true);
+  assert.equal(audit.columns.returned_count.notNull, true);
+  assert.ok(item.foreignKeys.memory_retrieval_items_memory_candidate_id_memory_candidates_id_fk);
+
+  const migration = await readFile(memoryMigrationUrl, "utf8");
+  assert.doesNotMatch(
+    migration,
+    /\b(?:UPDATE|INSERT INTO)\s+"?(?:memory_candidates|thought_runs)"?/i,
+  );
 });

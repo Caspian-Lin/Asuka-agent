@@ -9,7 +9,7 @@
 - `thought_tick`：每 15 分钟检查各白名单 QQ 会话 watermark 后的新消息，由 primary 模型生成自然 Markdown 思绪并进行有界只读 tool-call 循环；fast 随后把原文编译为严格 reply/memory/task/no_action proposals，必要时最多要求两次 primary revision；
 - `memory_consolidation`：每天 03:00（Asia/Shanghai）由 primary 模型生成待审的 create/update/conflict 记忆候选。
 
-每个会话拥有独立 Thought Stream、Epoch、追加式 Turn 和 watermark。accepted proposal、Turn 完成状态、watermark 与消息 thought-read 状态已原子提交，`no_action` 同样是成功结果。预计下一轮达到可用输入的 72% 时，worker 会先用无工具的 primary 调用压缩旧 Epoch，再原子切换到携带完整摘要的新 Epoch；本轮新增消息不会被提前吞入摘要。操作员仍可关闭当前 Epoch 并开启空的新段，已提交 watermark 不回退。reply proposal 已接入服务端硬策略和 NapCat 唯一出站队列；默认总开关关闭且为 Shadow。当前没有正式记忆召回；`recall_memories` 在 reviewed memory store 上线前明确返回空，不会把待审候选伪装成已召回记忆。
+每个会话拥有独立 Thought Stream、Epoch、追加式 Turn 和 watermark。accepted proposal、Turn 完成状态、watermark 与消息 thought-read 状态已原子提交，`no_action` 同样是成功结果。预计下一轮达到可用输入的 72% 时，worker 会先用无工具的 primary 调用压缩旧 Epoch，再原子切换到携带完整摘要的新 Epoch；本轮新增消息不会被提前吞入摘要。操作员仍可关闭当前 Epoch 并开启空的新段，已提交 watermark 不回退。reply proposal 已接入服务端硬策略和 NapCat 唯一出站队列；默认总开关关闭且为 Shadow。`recall_memories` 已接入 Agent 全局、可审计的词法 retrieval port，但只读取显式 `active` 并通过 disclosure/validity/permission/threshold 的记录；普通流程不会自动激活待审候选。
 
 ```text
 scheduler -> queued job_run -> worker lease + heartbeat
@@ -28,7 +28,7 @@ scheduler -> queued job_run -> worker lease + heartbeat
 
 Migration `0006_glorious_rictor` 已建立 `thought_streams`、`thought_stream_epochs`、带 Stream/Epoch/Turn 顺序的 `thought_runs`，以及与实际副作用分离的 `action_proposals`。后续迁移加入 primary/compiler 检查点和 `outbound_policies / speech_decisions / outbound_deliveries`；`0010_brief_hulk` 为模型调用和 Epoch 增加 cache token 审计，不迁移旧思绪数据。`llm_calls.purpose` 区分 primary、工具续轮、compiler、revision 和 compression；消息使用 `author_kind`、`direction`、平台消息 ID 与 receipt 表达用户、Asuka 和平台回显。
 
-上下文 projector 已按 Stream 读取首次初始化历史并集、当前 Epoch 已提交 Turn、压缩输出和本轮新消息。它以模型配置的 `context_window` 计算预算，先裁剪可选历史/低相关记忆，再按时间将必选新消息分块；每块成功后才推进到该块末尾。每次供应商实际收到的无请求头 JSON 请求体、messages 和所引用的 context items 都写入 `llm_calls`，可由 inspector 原样重放；API Key 只存在于请求头，不进入审计载荷。当前正式 memory store 尚未实现，因此 recalled-memory 段保持为空，但顺序和预算接口已经固定。
+上下文 projector 已按 Stream 读取首次初始化历史并集、当前 Epoch 已提交 Turn、压缩输出、本轮允许披露且达到阈值的 active memory 和新消息。它以模型配置的 `context_window` 计算预算，先裁剪可选历史/低相关记忆，再按时间将必选新消息分块；每块成功后才推进到该块末尾。每次供应商实际收到的无请求头 JSON 请求体、messages 和所引用的 context items 都写入 `llm_calls`，可由 inspector 原样重放；API Key 只存在于请求头，不进入审计载荷。召回 query、空结果和逐条 policy/threshold decision 另存到 `memory_retrieval_audits/items`。
 
 本仓库仍处于内部开发测试期，`0006` 不为旧 Thought Run 生成兼容 Stream 或 Epoch。已有 0005 测试数据的本地环境应先停止后端进程，确认 `.env` 指向可丢弃的本机数据库，再执行 `make db-reset CONFIRM_DATABASE_RESET=<库名>`；不要手工补列或直接改表。若需要回退本项，实现层回滚提交后同样重建测试数据库至目标 migration，而不是尝试保留临时测试数据。
 

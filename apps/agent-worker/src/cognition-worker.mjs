@@ -45,6 +45,14 @@ import {
   validateCompilerOutput,
 } from "@asuka-agent/agent-core/action-compiler";
 import {
+  buildMemoryProposal,
+  MemoryProposalError,
+} from "@asuka-agent/agent-core/memory-proposal";
+import {
+  createGlobalMemoryRetrievalPort,
+  MemoryRetrievalError,
+} from "@asuka-agent/agent-core/memory-retrieval";
+import {
   evaluateSpeechPolicy,
   speechContentHash,
 } from "@asuka-agent/agent-core/outbound-policy";
@@ -99,6 +107,9 @@ export function cognitionError(error) {
   }
   if (error instanceof ActionCompilerError) {
     return { code: error.code, message: error.message, retryable: error.retryable };
+  }
+  if (error instanceof MemoryProposalError || error instanceof MemoryRetrievalError) {
+    return { code: error.code, message: error.message, retryable: false };
   }
   if (error instanceof LlmConfigurationError) {
     const retryable = error.code === "provider_timeout" ||
@@ -432,12 +443,22 @@ export function createCognitionWorker({
         ORDER BY first_seen_at, participant_id
       `,
       sql`
-        SELECT id, subject_id, source_speaker_id, claim, attribution_status, status
+        SELECT id, conversation_id, subject_id, source_speaker_id, claim,
+               memory_type, sensitivity, disclosure_policy, valid_from, valid_to,
+               attribution_status, status
         FROM memory_candidates
-        WHERE conversation_id = ${conversation.id}
-          AND status = 'pending_review'
+        WHERE agent_id = ${run.agent_id}
+          AND status IN ('pending_review', 'active')
+          AND (
+            subject_id IN (
+              SELECT participant_id
+              FROM conversation_participants
+              WHERE conversation_id = ${conversation.id}
+            )
+            OR (subject_id IS NULL AND conversation_id = ${conversation.id})
+          )
         ORDER BY created_at DESC
-        LIMIT 50
+        LIMIT 200
       `,
     ]);
     return buildSpeakerContext({
@@ -464,12 +485,143 @@ export function createCognitionWorker({
       })),
       existingCandidates: existingCandidates.map((candidate) => ({
         id: candidate.id,
+        sourceConversationId: candidate.conversation_id,
         subjectId: candidate.subject_id,
         sourceSpeakerId: candidate.source_speaker_id,
         claim: candidate.claim,
+        memoryType: candidate.memory_type,
+        sensitivity: candidate.sensitivity,
+        disclosurePolicy: candidate.disclosure_policy,
+        validFrom: candidate.valid_from,
+        validTo: candidate.valid_to,
         attributionStatus: candidate.attribution_status,
         status: candidate.status,
       })),
+    });
+  }
+
+  function memoryPermissions(run) {
+    const configured = Array.isArray(run.config?.memoryPermissions)
+      ? run.config.memoryPermissions.map(String)
+      : [];
+    return [...new Set(["memory:normal:read", ...configured])].filter((permission) => (
+      [
+        "memory:normal:read",
+        "memory:sensitive:read",
+        "memory:restricted:read",
+      ].includes(permission)
+    ));
+  }
+
+  async function loadActiveMemories({ agentId }) {
+    const rows = await sql`
+      SELECT id, agent_id, conversation_id, thought_run_id, memory_type,
+             subject_id, source_speaker_id, claim, evidence_message_ids,
+             confidence_millis, attribution_status, sensitivity,
+             disclosure_policy, valid_from, valid_to, status
+      FROM memory_candidates
+      WHERE agent_id = ${agentId}
+        AND status = 'active'
+      ORDER BY created_at DESC, id
+      LIMIT 1_000
+    `;
+    return rows.map((row) => ({
+      id: String(row.id),
+      agentId: String(row.agent_id),
+      sourceConversationId: String(row.conversation_id),
+      thoughtRunId: String(row.thought_run_id),
+      memoryType: String(row.memory_type),
+      subjectId: row.subject_id == null ? null : String(row.subject_id),
+      sourceSpeakerId: String(row.source_speaker_id),
+      claim: String(row.claim),
+      evidenceMessageIds: Array.isArray(row.evidence_message_ids)
+        ? row.evidence_message_ids.map(String)
+        : [],
+      confidenceMillis: Number(row.confidence_millis),
+      attributionStatus: String(row.attribution_status),
+      sensitivity: String(row.sensitivity),
+      disclosurePolicy: row.disclosure_policy,
+      validFrom: row.valid_from,
+      validTo: row.valid_to,
+      status: String(row.status),
+    }));
+  }
+
+  async function recordMemoryRetrievalAudit(audit) {
+    const now = clock();
+    await sql.begin(async (tx) => {
+      await tx`
+        INSERT INTO memory_retrieval_audits (
+          id, agent_id, conversation_id, thought_run_id, mode, query,
+          query_hash, requested_limit, minimum_relevance_millis,
+          candidate_count, filtered_count, returned_count, created_at
+        ) VALUES (
+          ${audit.requestId}, ${audit.agentId}, ${audit.conversationId},
+          ${audit.thoughtRunId}, ${audit.mode}, ${audit.query}, ${audit.queryHash},
+          ${audit.requestedLimit}, ${audit.minimumRelevanceMillis},
+          ${audit.candidateCount}, ${audit.filteredCount}, ${audit.returnedCount},
+          ${now}
+        )
+        ON CONFLICT (id) DO NOTHING
+      `;
+      for (const decision of audit.decisions) {
+        await tx`
+          INSERT INTO memory_retrieval_items (
+            audit_id, memory_candidate_id, decision, reason_code,
+            relevance_millis, rank, created_at
+          ) VALUES (
+            ${audit.requestId}, ${decision.memoryId}, ${decision.decision},
+            ${decision.reason}, ${decision.relevanceMillis}, ${decision.rank}, ${now}
+          )
+          ON CONFLICT (audit_id, memory_candidate_id) DO NOTHING
+        `;
+      }
+    });
+  }
+
+  const memoryRetrievalPort = createGlobalMemoryRetrievalPort({
+    loadActiveMemories,
+    recordAudit: recordMemoryRetrievalAudit,
+    clock,
+  });
+
+  function passiveMemoryQuery(context) {
+    return context.messages
+      .slice(-20)
+      .map((message) => String(message.content).trim())
+      .filter(Boolean)
+      .join("\n")
+      .slice(-2_000);
+  }
+
+  async function retrieveForThought({
+    run,
+    thoughtRunId,
+    context,
+    query,
+    mode,
+    requestId,
+    limit,
+  }) {
+    const configuredThreshold = Number(run.config?.memoryRelevanceThresholdMillis ?? 160);
+    const minimumRelevanceMillis = Number.isSafeInteger(configuredThreshold) &&
+        configuredThreshold >= 1 && configuredThreshold <= 1_000
+      ? configuredThreshold
+      : 160;
+    return memoryRetrievalPort.retrieve({
+      requestId,
+      thoughtRunId,
+      mode,
+      query,
+      limit,
+      minimumRelevanceMillis,
+      request: {
+        agentId: run.agent_id,
+        conversationId: context.conversation.conversation_id,
+        conversationType: context.conversation.type,
+        participantIds: context.participants.map((participant) => participant.participant_id),
+        permissions: memoryPermissions(run),
+      },
     });
   }
 
@@ -755,6 +907,26 @@ export function createCognitionWorker({
           anchorAt: lastMessage.sent_at,
         })
       : [];
+    const passiveQuery = passiveMemoryQuery(context);
+    const configuredPassiveMemoryLimit = Number(run.config?.passiveMemoryLimit ?? 4);
+    const passiveMemoryLimit = Number.isSafeInteger(configuredPassiveMemoryLimit)
+      ? Math.min(12, Math.max(1, configuredPassiveMemoryLimit))
+      : 4;
+    const recalledMemories = run.job_type === "thought_tick" && passiveQuery
+      ? (await retrieveForThought({
+          run,
+          thoughtRunId: thoughtRun.id,
+          context,
+          query: passiveQuery,
+          mode: "passive",
+          requestId: `memory-retrieval:${stableHash({
+            thoughtRunId: thoughtRun.id,
+            mode: "passive",
+            query: passiveQuery,
+          })}`,
+          limit: passiveMemoryLimit,
+        })).memories
+      : [];
     return {
       epochId: epoch?.id ?? thoughtRun.epochId,
       epochOrdinal: Number(epoch?.ordinal ?? 1),
@@ -774,7 +946,7 @@ export function createCognitionWorker({
         : null,
       initializationHistory,
       committedTurns,
-      recalledMemories: [],
+      recalledMemories,
     };
   }
 
@@ -1093,7 +1265,7 @@ export function createCognitionWorker({
     );
   }
 
-  async function executePrimaryTool(conversationId, toolCall) {
+  async function executePrimaryTool(run, thoughtRunId, context, toolCall) {
     let parsed;
     try {
       parsed = parsePrimaryToolCall(toolCall);
@@ -1107,11 +1279,40 @@ export function createCognitionWorker({
       };
     }
     if (parsed.name === "recall_memories") {
+      const result = await retrieveForThought({
+        run,
+        thoughtRunId,
+        context,
+        query: parsed.arguments.query,
+        mode: "tool",
+        requestId: `memory-retrieval:${stableHash({
+          thoughtRunId,
+          mode: "tool",
+          toolCallId: toolCall.id,
+          query: parsed.arguments.query,
+          limit: parsed.arguments.limit,
+        })}`,
+        limit: parsed.arguments.limit,
+      });
       return {
         ok: true,
         query: parsed.arguments.query,
-        memories: [],
-        notice: "Reviewed Agent-global memory store is not available in this MVP.",
+        memories: result.memories.map((memory) => ({
+          memory_id: memory.memoryId,
+          content: memory.content,
+          subject_id: memory.subjectId,
+          source_speaker_id: memory.sourceSpeakerId,
+          source_conversation_id: memory.sourceConversationId,
+          thought_run_id: memory.thoughtRunId,
+          evidence_message_ids: memory.evidenceIds,
+          sensitivity: memory.sensitivity,
+          valid_from: memory.validFrom,
+          valid_to: memory.validTo,
+          relevance_millis: memory.relevanceMillis,
+        })),
+        notice: result.memories.length
+          ? null
+          : "No active memory passed disclosure, validity, and relevance thresholds.",
       };
     }
     if (parsed.name === "search_conversation_messages") {
@@ -1119,7 +1320,7 @@ export function createCognitionWorker({
         SELECT id, author_kind, sender_id, sender_display_name,
                reply_to_external_message_id, content, created_at
         FROM messages
-        WHERE conversation_id = ${conversationId}
+        WHERE conversation_id = ${context.conversation.conversation_id}
           AND content ILIKE ${`%${parsed.arguments.query}%`}
         ORDER BY created_at DESC, id DESC
         LIMIT ${parsed.arguments.limit}
@@ -1146,7 +1347,7 @@ export function createCognitionWorker({
       SELECT id, author_kind, sender_id, sender_display_name,
              reply_to_external_message_id, content, created_at
       FROM messages
-      WHERE conversation_id = ${conversationId}
+      WHERE conversation_id = ${context.conversation.conversation_id}
         AND id = ANY(${parsed.arguments.messageIds}::text[])
     `;
     const byId = new Map(rows.map((row) => [String(row.id), row]));
@@ -1172,7 +1373,13 @@ export function createCognitionWorker({
     };
   }
 
-  async function ensurePrimaryToolResults({ run, thoughtRunId, llmCallId, toolCalls }) {
+  async function ensurePrimaryToolResults({
+    run,
+    thoughtRunId,
+    llmCallId,
+    context,
+    toolCalls,
+  }) {
     const messages = [];
     for (const toolCall of toolCalls) {
       const resultId = `tool-result:${stableHash({
@@ -1187,10 +1394,7 @@ export function createCognitionWorker({
       `;
       if (!rows[0]) {
         await heartbeat(run.id);
-        const result = await executePrimaryTool(
-          run.conversation_id,
-          toolCall,
-        );
+        const result = await executePrimaryTool(run, thoughtRunId, context, toolCall);
         const content = JSON.stringify(result).slice(0, 20_000);
         const parsed = (() => {
           try {
@@ -1362,6 +1566,7 @@ export function createCognitionWorker({
         run: { ...run, conversation_id: projection.conversationId },
         thoughtRunId: thoughtRun.id,
         llmCallId: latest.id,
+        context: projection.context,
         toolCalls: latest.response.toolCalls,
       });
       messages = [
@@ -1442,6 +1647,7 @@ export function createCognitionWorker({
           run: { ...run, conversation_id: projection.conversationId },
           thoughtRunId: thoughtRun.id,
           llmCallId,
+          context: projection.context,
           toolCalls,
         }),
       });
@@ -1811,6 +2017,74 @@ export function createCognitionWorker({
           RETURNING id
         `;
         insertedCount += inserted.length;
+        if (inserted.length && action.type === "memory") {
+          const messageEvidenceIds = action.evidenceReferences
+            .filter((reference) => reference.type === "message")
+            .map((reference) => reference.id);
+          const memoryProposal = buildMemoryProposal({
+            operation: "create",
+            memoryType: "fact",
+            subjectId: action.subjectId,
+            sourceSpeakerId: action.sourceSpeakerId,
+            sourceConversationId: thoughtRun.conversationId,
+            thoughtRunId: thoughtRun.id,
+            claim: action.content,
+            evidenceMessageIds: messageEvidenceIds,
+            confidenceMillis: 500,
+            attributionStatus: action.subjectId == null ? "unresolved" : "resolved",
+            sensitivity: action.sensitivity,
+            disclosurePolicy: null,
+            validFrom: null,
+            validTo: null,
+            targetCandidateId: null,
+            existingCandidates: [],
+            promptVersion: ACTION_COMPILER_PROMPT_VERSION,
+          });
+          const candidateId = `memory-candidate:${stableHash({ proposalId })}`;
+          await tx`
+            INSERT INTO memory_candidates (
+              id, agent_id, conversation_id, job_run_id, thought_run_id,
+              idempotency_key, operation, memory_type, subject_id,
+              source_speaker_id, claim, evidence_message_ids, confidence_millis,
+              attribution_status, sensitivity, disclosure_policy, valid_from,
+              valid_to, target_candidate_id, diff, status, prompt_version,
+              created_at, updated_at
+            ) VALUES (
+              ${candidateId}, ${run.agent_id}, ${thoughtRun.conversationId},
+              ${run.id}, ${thoughtRun.id}, ${`memory:${idempotencyKey}`},
+              ${memoryProposal.operation}, ${memoryProposal.memoryType},
+              ${memoryProposal.subjectId}, ${memoryProposal.sourceSpeakerId},
+              ${memoryProposal.claim}, ${tx.json(memoryProposal.evidenceMessageIds)},
+              ${memoryProposal.confidenceMillis}, ${memoryProposal.attributionStatus},
+              ${memoryProposal.sensitivity}, ${tx.json(memoryProposal.disclosurePolicy)},
+              ${memoryProposal.validFrom}, ${memoryProposal.validTo},
+              ${memoryProposal.targetCandidateId}, ${tx.json(memoryProposal.diff)},
+              'pending_review', ${memoryProposal.promptVersion}, ${now}, ${now}
+            )
+            ON CONFLICT (idempotency_key) DO NOTHING
+          `;
+          await tx`
+            INSERT INTO events (
+              id, conversation_id, event_type, source_type, payload_json,
+              correlation_id, created_at
+            ) VALUES (
+              ${`event:memory-candidate:${candidateId}`},
+              ${thoughtRun.conversationId}, 'memory_candidate_created', 'agent',
+              ${tx.json({
+                candidateId,
+                proposalId,
+                thoughtRunId: thoughtRun.id,
+                sourceConversationId: thoughtRun.conversationId,
+                subjectId: memoryProposal.subjectId,
+                sourceSpeakerId: memoryProposal.sourceSpeakerId,
+                evidenceMessageIds: memoryProposal.evidenceMessageIds,
+                sensitivity: memoryProposal.sensitivity,
+                disclosurePolicy: memoryProposal.disclosurePolicy,
+              })}, ${run.correlation_id}, ${now}
+            )
+            ON CONFLICT (id) DO NOTHING
+          `;
+        }
         await tx`
           INSERT INTO events (
             id, conversation_id, event_type, source_type, payload_json,
@@ -2420,7 +2694,10 @@ export function createCognitionWorker({
           }
         }
       } else {
-        const candidates = validateMemoryOutput(output, context);
+        const candidates = validateMemoryOutput(output, context, {
+          thoughtRunId,
+          promptVersion: request.promptVersion,
+        });
         for (const [candidateIndex, candidate] of candidates.entries()) {
           const idempotencyKey = outputIdempotencyKey(
             run.job_type,
@@ -2432,18 +2709,21 @@ export function createCognitionWorker({
           const inserted = await tx`
             INSERT INTO memory_candidates (
               id, agent_id, conversation_id, job_run_id, thought_run_id,
-              idempotency_key, operation, subject_id, source_speaker_id,
-              claim, evidence_message_ids, confidence_millis,
-              attribution_status, target_candidate_id, status,
-              prompt_version, created_at, updated_at
+              idempotency_key, operation, memory_type, subject_id,
+              source_speaker_id, claim, evidence_message_ids, confidence_millis,
+              attribution_status, sensitivity, disclosure_policy, valid_from,
+              valid_to, target_candidate_id, diff, status, prompt_version,
+              created_at, updated_at
             ) VALUES (
               ${candidateId}, ${run.agent_id}, ${context.conversation.conversation_id},
               ${run.id}, ${thoughtRunId}, ${idempotencyKey},
-              ${candidate.operation}, ${candidate.subjectId},
+              ${candidate.operation}, ${candidate.memoryType}, ${candidate.subjectId},
               ${candidate.sourceSpeakerId}, ${candidate.claim},
               ${tx.json(candidate.evidenceMessageIds)},
               ${candidate.confidenceMillis}, ${candidate.attributionStatus},
-              ${candidate.targetCandidateId}, 'pending_review',
+              ${candidate.sensitivity}, ${tx.json(candidate.disclosurePolicy)},
+              ${candidate.validFrom}, ${candidate.validTo},
+              ${candidate.targetCandidateId}, ${tx.json(candidate.diff)}, 'pending_review',
               ${request.promptVersion}, ${now}, ${now}
             )
             ON CONFLICT (idempotency_key) DO NOTHING
@@ -2464,9 +2744,17 @@ export function createCognitionWorker({
                   thoughtRunId,
                   jobRunId: run.id,
                   operation: candidate.operation,
+                  memoryType: candidate.memoryType,
                   subjectId: candidate.subjectId,
                   sourceSpeakerId: candidate.sourceSpeakerId,
+                  sourceConversationId: candidate.sourceConversationId,
                   evidenceMessageIds: candidate.evidenceMessageIds,
+                  sensitivity: candidate.sensitivity,
+                  disclosurePolicy: candidate.disclosurePolicy,
+                  validFrom: candidate.validFrom,
+                  validTo: candidate.validTo,
+                  targetCandidateId: candidate.targetCandidateId,
+                  diff: candidate.diff,
                 })}, ${run.correlation_id}, ${now}
               )
             `;

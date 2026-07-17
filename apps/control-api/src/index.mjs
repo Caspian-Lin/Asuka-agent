@@ -197,10 +197,11 @@ const jobsRepository = {
         WHERE job_run_id = ${runId} ORDER BY created_at
       `,
       sql`
-        SELECT id, thought_run_id, conversation_id, operation, subject_id, source_speaker_id,
-               claim, evidence_message_ids, confidence_millis,
-               attribution_status, target_candidate_id, status,
-               prompt_version, created_at
+        SELECT id, thought_run_id, conversation_id, operation, memory_type,
+               subject_id, source_speaker_id, claim, evidence_message_ids,
+               confidence_millis, attribution_status, sensitivity,
+               disclosure_policy, valid_from, valid_to, target_candidate_id,
+               diff, status, prompt_version, created_at
         FROM memory_candidates
         WHERE job_run_id = ${runId} ORDER BY created_at
       `,
@@ -686,7 +687,7 @@ async function getThoughtRunDetail(thoughtRunId) {
     LIMIT 1
   `;
   if (!runs[0]) throw new RequestError("thought_run_not_found", "思绪运行不存在", 404);
-  const [calls, outputs, candidates, proposals, participants] = await Promise.all([
+  const [calls, outputs, candidates, proposals, participants, retrievals] = await Promise.all([
     sql`
       SELECT call.id, call.sequence_number, call.purpose, call.profile, call.provider,
              call.model, call.prompt_version, call.status, call.error_code,
@@ -722,9 +723,10 @@ async function getThoughtRunDetail(thoughtRunId) {
       ORDER BY created_at
     `,
     sql`
-      SELECT id, operation, subject_id, source_speaker_id, claim,
+      SELECT id, operation, memory_type, subject_id, source_speaker_id, claim,
              evidence_message_ids, confidence_millis, attribution_status,
-             target_candidate_id, status, prompt_version, created_at
+             sensitivity, disclosure_policy, valid_from, valid_to,
+             target_candidate_id, diff, status, prompt_version, created_at
       FROM memory_candidates
       WHERE thought_run_id = ${thoughtRunId}
       ORDER BY created_at
@@ -752,6 +754,29 @@ async function getThoughtRunDetail(thoughtRunId) {
       FROM conversation_participants
       WHERE conversation_id = ${runs[0].conversation_id}
       ORDER BY first_seen_at, participant_id
+    `,
+    sql`
+      SELECT audit.id, audit.mode, audit.query, audit.query_hash,
+             audit.requested_limit, audit.minimum_relevance_millis,
+             audit.candidate_count, audit.filtered_count, audit.returned_count,
+             audit.created_at,
+             COALESCE(
+               jsonb_agg(
+                 jsonb_build_object(
+                   'memoryCandidateId', item.memory_candidate_id,
+                   'decision', item.decision,
+                   'reasonCode', item.reason_code,
+                   'relevanceMillis', item.relevance_millis,
+                   'rank', item.rank
+                 ) ORDER BY item.rank NULLS LAST, item.memory_candidate_id
+               ) FILTER (WHERE item.memory_candidate_id IS NOT NULL),
+               '[]'::jsonb
+             ) AS items
+      FROM memory_retrieval_audits AS audit
+      LEFT JOIN memory_retrieval_items AS item ON item.audit_id = audit.id
+      WHERE audit.thought_run_id = ${thoughtRunId}
+      GROUP BY audit.id
+      ORDER BY audit.created_at, audit.id
     `,
   ]);
   const contextRunIds = [...new Set(calls.flatMap((call) => (
@@ -805,17 +830,20 @@ async function getThoughtRunDetail(thoughtRunId) {
     candidates,
     proposals,
     participants,
+    retrievals,
     contextRuns,
   };
 }
 
 async function listMemoryCandidates() {
   return sql`
-    SELECT candidate.id, candidate.operation, candidate.subject_id,
-           candidate.source_speaker_id, candidate.claim,
+    SELECT candidate.id, candidate.operation, candidate.memory_type,
+           candidate.subject_id, candidate.source_speaker_id, candidate.claim,
            candidate.evidence_message_ids, candidate.confidence_millis,
-           candidate.attribution_status, candidate.target_candidate_id,
-           candidate.status, candidate.prompt_version, candidate.created_at,
+           candidate.attribution_status, candidate.sensitivity,
+           candidate.disclosure_policy, candidate.valid_from, candidate.valid_to,
+           candidate.target_candidate_id, candidate.diff, candidate.status,
+           candidate.prompt_version, candidate.created_at,
            candidate.updated_at, candidate.thought_run_id,
            thought.summary AS thought_summary,
            thought.trigger_type, thought.trigger_reason,
