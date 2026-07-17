@@ -52,6 +52,7 @@ import {
   createGlobalMemoryRetrievalPort,
   MemoryRetrievalError,
 } from "@asuka-agent/agent-core/memory-retrieval";
+import { nextRunAt } from "@asuka-agent/agent-core/scheduler-config";
 import {
   evaluateSpeechPolicy,
   speechContentHash,
@@ -67,28 +68,13 @@ import { errorMessage } from "@asuka-agent/shared";
 
 const cognitionJobTypes = new Set(["thought_tick", "memory_consolidation"]);
 
-export function nextRunAt(job, now = new Date()) {
-  if (job.job_type === "thought_tick") {
-    const intervalSeconds = Number(job.config?.intervalSeconds ?? 900);
-    const safeSeconds = Number.isSafeInteger(intervalSeconds) && intervalSeconds > 0
-      ? intervalSeconds
-      : 900;
-    const scheduled = job.next_run_at ? new Date(job.next_run_at) : now;
-    return new Date(Math.max(now.getTime(), scheduled.getTime()) + safeSeconds * 1_000);
-  }
-  const dailyHour = Number(job.config?.dailyHour ?? 3);
-  const safeHour = Number.isSafeInteger(dailyHour) && dailyHour >= 0 && dailyHour <= 23
-    ? dailyHour
-    : 3;
-  const shanghaiNow = new Date(now.getTime() + 8 * 60 * 60_000);
-  let target = new Date(Date.UTC(
-    shanghaiNow.getUTCFullYear(),
-    shanghaiNow.getUTCMonth(),
-    shanghaiNow.getUTCDate(),
-    safeHour - 8,
-  ));
-  if (target <= now) target = new Date(target.getTime() + 24 * 60 * 60_000);
-  return target;
+export { nextRunAt };
+
+export function runTargetConversationId(run) {
+  const conversationId = run?.parameters?.conversationId;
+  return typeof conversationId === "string" && conversationId.trim()
+    ? conversationId
+    : null;
 }
 
 export function retryDelayMs(attemptCount) {
@@ -241,12 +227,12 @@ export function createCognitionWorker({
           INSERT INTO job_runs (
             id, job_id, status, trigger_type, idempotency_key, correlation_id,
             scheduled_for, available_at, attempt_count, max_attempts,
-            started_at, completed_at, metrics, created_at
+            parameters, started_at, completed_at, metrics, created_at
           ) VALUES (
             ${runId}, ${job.id}, 'queued', 'schedule',
             ${`scheduled:${job.id}:${scheduledFor.toISOString()}`},
             ${`job-run:${runId}`}, ${scheduledFor}, ${now}, 0,
-            ${maxAttempts}, NULL, NULL,
+            ${maxAttempts}, ${tx.json({})}, NULL, NULL,
             ${tx.json({})}, ${now}
           )
           ON CONFLICT (idempotency_key) DO NOTHING
@@ -367,6 +353,7 @@ export function createCognitionWorker({
   }
 
   async function eligibleConversations(run) {
+    const targetConversationId = runTargetConversationId(run);
     return sql`
       SELECT c.id, c.title, c.channel, c.external_id,
              CASE WHEN ${run.job_type} = 'thought_tick'
@@ -388,6 +375,7 @@ export function createCognitionWorker({
       WHERE c.agent_id = ${run.agent_id}
         AND c.channel = 'napcat'
         AND c.status = 'active'
+        AND (${targetConversationId}::text IS NULL OR c.id = ${targetConversationId})
         AND EXISTS (
           SELECT 1
           FROM messages AS message

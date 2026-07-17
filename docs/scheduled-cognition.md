@@ -9,6 +9,10 @@
 - `thought_tick`：每 15 分钟检查各白名单 QQ 会话 watermark 后的新消息，由 primary 模型生成自然 Markdown 思绪并进行有界只读 tool-call 循环；fast 随后把原文编译为严格 reply/memory/task/no_action proposals，必要时最多要求两次 primary revision；
 - `memory_consolidation`：每天 03:00（Asia/Shanghai）由 primary 模型生成待审的 create/update/conflict 记忆候选。
 
+两项认知任务可在控制台编辑启停、调度时间、单会话消息上限与最大尝试次数；NapCat 接收和入站投影仍由系统托管，不能通过该入口修改。保存配置时服务端按任务类型校验并重新计算 `next_run_at`，不接受任意 JSON 覆盖。
+
+`thought_tick` 的“立即运行”允许选择一个活跃 NapCat 会话。该目标只写入本次 `job_runs.parameters.conversationId`，Worker 不会把它保存为长期任务范围；计划触发和未指定目标的手动触发继续扫描所有有新增消息的会话。指定会话当前没有新增消息时，Run 以零处理量成功结束且不调用模型，审计详情仍保留本次范围。
+
 每个会话拥有独立 Thought Stream、Epoch、追加式 Turn 和 watermark。accepted proposal、Turn 完成状态、watermark 与消息 thought-read 状态已原子提交，`no_action` 同样是成功结果。预计下一轮达到可用输入的 72% 时，worker 会先用无工具的 primary 调用压缩旧 Epoch，再原子切换到携带完整摘要的新 Epoch；本轮新增消息不会被提前吞入摘要。操作员仍可关闭当前 Epoch 并开启空的新段，已提交 watermark 不回退。reply proposal 已接入服务端硬策略和 NapCat 唯一出站队列；默认总开关关闭且为 Shadow。`recall_memories` 已接入 Agent 全局、可审计的词法 retrieval port，但只读取显式 `active` 并通过 disclosure/validity/permission/threshold 的记录；普通流程不会自动激活待审候选。
 
 ```text
@@ -275,7 +279,9 @@ Asuka 当前状态：已提出群内回复，等待发送策略处理；如果�
 5. 在 Thought Run inspector 查看触发、调用上下文、token 和来源。
 
 ```bash
-curl -X POST http://127.0.0.1:3002/api/jobs/job-thought-tick/run
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"conversationId":"CONVERSATION_ID"}' \
+  http://127.0.0.1:3002/api/jobs/job-thought-tick/run
 curl http://127.0.0.1:3002/api/jobs/job-thought-tick/runs
 curl http://127.0.0.1:3002/api/job-runs/RUN_ID
 ```

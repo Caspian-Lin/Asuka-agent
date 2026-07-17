@@ -1,10 +1,10 @@
 # Asuka Agent：需求与开发设计文档
 
-> 文档版本：0.6.6（Agent 全局记忆提案与披露边界）
+> 文档版本：0.6.7（可配置认知调度与定向手动运行）
 >
 > 更新时间：2026-07-17
 >
-> 状态：NapCat QQ 双向接入、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、Epoch 自动压缩/恢复、primary/fast 分层、自主外发，以及 Agent 全局记忆提案、披露过滤和可审计召回端口已实现；正式审核激活状态机与混合检索继续按依赖链实现
+> 状态：NapCat QQ 双向接入、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、Epoch 自动压缩/恢复、primary/fast 分层、自主外发、Agent 全局记忆提案/披露召回，以及可配置认知调度与定向会话手动运行已实现；正式审核激活状态机与混合检索继续按依赖链实现
 >
 > 配套实现：`Asuka Agent`
 
@@ -463,7 +463,7 @@ Thought Stream v2 在现有运行记录之上增加持续状态，不把一个 j
 
 ```text
 jobs                 定时任务定义
-job_runs             每次执行、lease、retry、error、归档
+job_runs             每次执行、一次性 parameters、lease、retry、error、归档
 tool_packages        安装来源、版本、签名、manifest hash
 tool_capabilities    read/write/send/spend 等细粒度权限
 tool_calls           参数、结果摘要、副作用、审批人
@@ -486,7 +486,9 @@ Web 只调用本地 PostgreSQL control API，默认监听 `127.0.0.1:3002`：
 | GET | `/api/im` | 查询 Channel、群会话、历史消息和未读数 |
 | POST | `/api/im/read` | 将指定会话的入站用户消息标为已读 |
 | GET | `/api/jobs` | 查询系统托管任务、规划任务和最近运行 |
-| POST | `/api/jobs/:jobId/run` | 手动入队 `thought_tick | memory_consolidation` |
+| GET | `/api/jobs/conversations` | 查询可作为手动思绪整理范围的活跃 NapCat 会话 |
+| PUT | `/api/jobs/:jobId` | 校验并更新可配置认知任务的启停、计划和运行限制 |
+| POST | `/api/jobs/:jobId/run` | 手动入队 `thought_tick | memory_consolidation`；思绪任务可携带一次性 `conversationId` |
 | GET | `/api/jobs/:jobId/runs` | 查询最近 50 次 run、尝试和错误状态 |
 | GET | `/api/job-runs/:runId` | 查询模型审计、结构化结果和 watermark |
 | GET | `/api/thought-runs` | 查询真实思绪过程、触发、耗时与 token 汇总 |
@@ -687,7 +689,9 @@ last_success_at / next_run_at
 
 ### 12.4 当前任务控制面
 
-已登记两个不可配置的基础任务：NapCat WebSocket 事件接收、每 5 秒入站投影。认知 worker 与入站循环并行运行，因此模型超时或失败不会阻塞 QQ 落库。`thought_tick` 默认每 15 分钟使用 primary 档生成自然 Markdown 思绪并允许只读工具循环，再由 fast 编译为严格 proposals；compiler 可请求最多两次 primary revision。accepted/no_action proposal、Turn、Stream watermark、job watermark 与消息 thought-read 状态原子提交。`memory_consolidation` 仍保留每日 03:00 的旧候选整理任务，后续由统一 memory proposal 流程替代。任务使用 `queued → running → retry_wait | succeeded | dead_letter`、job/Stream lease、heartbeat、有限退避和分阶段检查点。完整运行协议见 `docs/scheduled-cognition.md`。
+已登记两个不可配置的基础任务：NapCat WebSocket 事件接收、每 5 秒入站投影；服务端拒绝修改它们。`thought_tick` 与 `memory_consolidation` 是可配置认知任务，控制台可编辑启停、执行间隔/每日时间、单会话消息上限和最大尝试次数，服务端按任务类型校验并原子重算 `next_run_at`。认知 worker 与入站循环并行运行，因此模型超时或失败不会阻塞 QQ 落库。
+
+`thought_tick` 默认每 15 分钟使用 primary 档生成自然 Markdown 思绪并允许只读工具循环，再由 fast 编译为严格 proposals；compiler 可请求最多两次 primary revision。手动立即运行可以在 `job_runs.parameters.conversationId` 保存一个活跃 NapCat 会话目标，Worker 只在该次 Run 过滤会话；没有该参数的手动/计划 Run 仍扫描所有有新增消息的会话。目标会话没有新增消息时 Run 正常成功且处理量为 0，不调用模型。一次性目标不会改写任务计划。accepted/no_action proposal、Turn、Stream watermark、job watermark 与消息 thought-read 状态原子提交。`memory_consolidation` 默认每日 03:00 生成全局待审候选，后续由统一 memory proposal 流程替代。任务使用 `queued → running → retry_wait | succeeded | dead_letter`、job/Stream lease、heartbeat、有限退避和分阶段检查点。完整运行协议见 `docs/scheduled-cognition.md`。
 
 群聊知识空间仍然共享，不按用户硬隔离。每条上下文消息必须携带稳定 `sender_id`、首次固定的显示名、reply target、时间和 message ID；新昵称只追加为 alias。记忆结果分开保存 `source_speaker_id` 与 `subject_id`。确定性校验拒绝上下文外证据、未知 subject、未解析对象上的强行绑定，以及 source 没有实际说出证据的候选。
 

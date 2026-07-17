@@ -374,6 +374,7 @@ export const jobRuns = pgTable(
     completedAt: timestamp("completed_at", { withTimezone: true }),
     errorCode: text("error_code"),
     errorMessage: text("error_message"),
+    parameters: jsonb("parameters").notNull().default({}),
     metrics: jsonb("metrics").notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },

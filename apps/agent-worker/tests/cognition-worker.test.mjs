@@ -10,6 +10,7 @@ import {
   effectiveContextWindow,
   nextRunAt,
   retryDelayMs,
+  runTargetConversationId,
   thoughtEpochIdFor,
   thoughtRunIdFor,
   thoughtStreamIdFor,
@@ -36,6 +37,14 @@ test("daily consolidation resolves the next 03:00 Asia/Shanghai boundary", () =>
   }, new Date("2026-07-14T20:00:00Z"));
   assert.equal(before.toISOString(), "2026-07-14T19:00:00.000Z");
   assert.equal(after.toISOString(), "2026-07-15T19:00:00.000Z");
+});
+
+test("manual job parameters select one conversation without changing scheduled scope", () => {
+  assert.equal(runTargetConversationId({
+    parameters: { conversationId: "conversation-1" },
+  }), "conversation-1");
+  assert.equal(runTargetConversationId({ parameters: {} }), null);
+  assert.equal(runTargetConversationId({}), null);
 });
 
 test("only transient provider failures retry with bounded backoff", () => {
