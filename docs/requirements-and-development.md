@@ -890,6 +890,8 @@ make dev
 
 `make dev` 并行启动 Web（3000）、NapCat gateway、PostgreSQL control API（3002）和持续入站 worker。单独排错可使用 `make frontend`、`make backend`、`make gateway`、`make control-api` 与 `make worker`。
 
+内部开发 migration 明确不兼容旧测试数据时，先停止所有后端进程，再执行 `make db-reset CONFIRM_DATABASE_RESET=<DATABASE_URL 中的库名>`。该命令会永久删除目标库、从 `template0` 重建并应用完整 migration chain；它只允许 loopback PostgreSQL，并拒绝维护库、模板库或不精确的确认值。应用角色没有 `CREATEDB` 时，本机原生 PostgreSQL 会通过 `sudo -u postgres` 请求系统密码；容器或没有本地 sudo 的环境需临时设置同机同端口、连接 `postgres` 维护库的 `DATABASE_ADMIN_URL`。脚本会在删除前验证目标 owner 和可用的重建路径。不要用它处理任何需要保留的数据，完成后删除管理员连接配置。
+
 质量检查：
 
 ```bash
