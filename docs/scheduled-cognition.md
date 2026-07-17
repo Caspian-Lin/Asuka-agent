@@ -15,6 +15,8 @@
 
 每个会话拥有独立 Thought Stream、Epoch、追加式 Turn 和 watermark。accepted proposal、Turn 完成状态、watermark 与消息 thought-read 状态已原子提交，`no_action` 同样是成功结果。预计下一轮达到可用输入的 72% 时，worker 会先用无工具的 primary 调用压缩旧 Epoch，再原子切换到携带完整摘要的新 Epoch；本轮新增消息不会被提前吞入摘要。操作员仍可关闭当前 Epoch 并开启空的新段，已提交 watermark 不回退。reply proposal 已接入服务端硬策略和 NapCat 唯一出站队列；默认总开关关闭且为 Shadow。`recall_memories` 已接入 Agent 全局、可审计的词法 retrieval port，但只读取显式 `active` 并通过 disclosure/validity/permission/threshold 的记录；普通流程不会自动激活待审候选。
 
+控制台按 conversation 展示持续 Thought Stream，并在列表给出活动 Epoch 与最后 watermark。Turn inspector 以同一条时间线区分 compression、primary、tool continuation、compiler 和 revision；压缩后的 Epoch 可以展开其覆盖 Turn 摘要，但不会默认复制旧 Trace。每个 action proposal 同时展示 Primary 连续原文校验、实际 evidence、服务端 Policy 和 Executor Effect，`no_action`、revision 与 compiler failure 使用不同状态。Trace API 默认脱敏 `sensitive/restricted` 内容并始终清除 secret-shaped 字段；仅当 Control API 绑定 loopback 且显式设置 `CONTROL_API_THOUGHT_TRACE_ACCESS=full` 时返回敏感原文。
+
 ```text
 scheduler -> queued job_run -> worker lease + heartbeat
           -> messages after per-conversation watermark
@@ -253,7 +255,7 @@ Asuka 当前状态：已提出群内回复，等待发送策略处理；如果�
 
 ## 可观测性与验收
 
-每个 Turn 至少可查看：trigger、conversation、epoch、watermark 范围、实际上下文项、每轮模型/profile、工具调用、primary 自然输出、fast 编译结果、revision、token、缓存 token、压缩来源和最终 proposal。
+每个 Turn 至少可查看：trigger、conversation、epoch、watermark 范围、实际上下文项、每轮模型/profile、工具调用、primary 自然输出、fast 编译结果、revision、token、缓存 token、压缩来源，以及 Proposal → Policy → Effect 的最终状态。Proposal 的原文与 evidence 可直接回查；被 compression 覆盖的旧 Turn 默认只列摘要，需要时再进入原 Trace。
 
 验收必须覆盖：
 
