@@ -12,6 +12,7 @@ import {
 import {
   projectThoughtContext,
   selectInitializationHistory,
+  shouldUseInitializationHistory,
   ThoughtContextError,
 } from "@asuka-agent/agent-core/thought-context";
 import {
@@ -42,6 +43,7 @@ import {
 import {
   decryptApiKey,
   LlmConfigurationError,
+  openAiCompatibleRequestPayload,
   OpenAiCompatibleProvider,
   parseEncryptionKey,
 } from "@asuka-agent/llm/runtime";
@@ -111,6 +113,50 @@ export function thoughtStreamIdFor(agentId, conversationId) {
 
 export function thoughtEpochIdFor(streamId, ordinal) {
   return `thought-epoch:${stableHash({ streamId, ordinal })}`;
+}
+
+export function committedToolTraceMessages(rows) {
+  return (rows ?? []).flatMap((row) => {
+    const toolCalls = Array.isArray(row.response_json?.toolCalls)
+      ? row.response_json.toolCalls
+      : [];
+    if (!toolCalls.length) return [];
+    const resultByCallId = new Map((row.tool_results ?? []).map((result) => [
+      String(result.referenceId),
+      result,
+    ]));
+    const callId = String(row.id);
+    const sequenceNumber = Number(row.sequence_number);
+    const messages = [{
+      callId,
+      sequenceNumber,
+      message: {
+        role: "assistant",
+        content: row.response_json?.content || null,
+        tool_calls: toolCalls,
+      },
+    }];
+    for (const toolCall of toolCalls) {
+      const result = resultByCallId.get(String(toolCall.id));
+      if (!result) {
+        throw new ThoughtContextError(
+          "committed_tool_result_missing",
+          `已提交调用 ${callId} 缺少工具 ${toolCall.id} 的返回记录`,
+        );
+      }
+      messages.push({
+        callId,
+        sequenceNumber,
+        message: {
+          role: "tool",
+          tool_call_id: String(toolCall.id),
+          name: String(toolCall.function?.name ?? result.metadata?.toolName ?? "unknown_tool"),
+          content: String(result.content),
+        },
+      });
+    }
+    return messages;
+  });
 }
 
 export function cognitionTriggerReason(run) {
@@ -464,6 +510,12 @@ export function createCognitionWorker({
         LIMIT 1
       `;
       if (existing[0]) {
+        if (existing[0].epoch_id !== epochId) {
+          throw new CognitionValidationError(
+            "thought_epoch_reset",
+            "该会话的短期上下文已由操作员重置",
+          );
+        }
         await tx`
           UPDATE thought_runs
           SET status = CASE WHEN primary_output IS NULL THEN 'running' ELSE status END,
@@ -574,15 +626,32 @@ export function createCognitionWorker({
       sql`
         SELECT thought.id, thought.turn_ordinal, thought.new_message_start_at,
                thought.new_message_start_id, thought.new_message_end_at,
-               thought.new_message_end_id, call.response_json ->> 'content' AS primary_output,
+               thought.new_message_end_id,
+               COALESCE(
+                 revision.response_json ->> 'content',
+                 thought.primary_output,
+                 call.response_json ->> 'content'
+               ) AS primary_output,
                proposal.proposal_state AS action_state
         FROM thought_runs AS thought
         LEFT JOIN LATERAL (
           SELECT response_json
           FROM llm_calls
           WHERE thought_run_id = thought.id
-            AND purpose IN ('primary', 'revision')
+            AND purpose = 'revision'
             AND status = 'succeeded'
+            AND NULLIF(BTRIM(response_json ->> 'content'), '') IS NOT NULL
+          ORDER BY sequence_number DESC
+          LIMIT 1
+        ) AS revision ON true
+        LEFT JOIN LATERAL (
+          SELECT response_json
+          FROM llm_calls
+          WHERE thought_run_id = thought.id
+            AND purpose IN ('primary', 'tool_continuation', 'revision')
+            AND status = 'succeeded'
+            AND NULLIF(BTRIM(response_json ->> 'content'), '') IS NOT NULL
+            AND jsonb_array_length(COALESCE(response_json -> 'toolCalls', '[]'::jsonb)) = 0
           ORDER BY sequence_number DESC
           LIMIT 1
         ) AS call ON true
@@ -599,19 +668,45 @@ export function createCognitionWorker({
       `,
     ]);
     const committedTurns = await Promise.all(committedRows.map(async (turn) => {
-      const rows = await sql`
-        SELECT id, author_kind, direction, sender_id, sender_display_name,
-               reply_to_external_message_id, content, created_at
-        FROM messages
-        WHERE conversation_id = ${conversation.id}
-          AND (created_at, id) >= (${turn.new_message_start_at}, ${turn.new_message_start_id})
-          AND (created_at, id) <= (${turn.new_message_end_at}, ${turn.new_message_end_id})
-        ORDER BY created_at, id
-      `;
+      const [rows, toolCallRows] = await Promise.all([
+        sql`
+          SELECT id, author_kind, direction, sender_id, sender_display_name,
+                 reply_to_external_message_id, content, created_at
+          FROM messages
+          WHERE conversation_id = ${conversation.id}
+            AND (created_at, id) >= (${turn.new_message_start_at}, ${turn.new_message_start_id})
+            AND (created_at, id) <= (${turn.new_message_end_at}, ${turn.new_message_end_id})
+          ORDER BY created_at, id
+        `,
+        sql`
+          SELECT call.id, call.sequence_number, call.response_json,
+                 COALESCE(
+                   jsonb_agg(
+                     jsonb_build_object(
+                       'referenceId', item.reference_id,
+                       'content', item.content,
+                       'metadata', item.metadata
+                     ) ORDER BY item.ordinal
+                   ) FILTER (WHERE item.item_type = 'tool_result'),
+                   '[]'::jsonb
+                 ) AS tool_results
+          FROM llm_calls AS call
+          LEFT JOIN llm_call_context_items AS item ON item.llm_call_id = call.id
+          WHERE call.thought_run_id = ${turn.id}
+            AND call.purpose IN ('primary', 'tool_continuation')
+            AND call.status = 'succeeded'
+            AND jsonb_array_length(
+              COALESCE(call.response_json -> 'toolCalls', '[]'::jsonb)
+            ) > 0
+          GROUP BY call.id
+          ORDER BY call.sequence_number
+        `,
+      ]);
       return {
         thoughtRunId: String(turn.id),
         turnOrdinal: Number(turn.turn_ordinal),
         newMessages: rows.map((row) => sourceFromRow(row, conversationType)),
+        toolTraceMessages: committedToolTraceMessages(toolCallRows),
         primaryOutput: turn.primary_output == null ? null : String(turn.primary_output),
         actionState: turn.action_state == null ? null : String(turn.action_state),
       };
@@ -619,7 +714,11 @@ export function createCognitionWorker({
     const candidates = historyRows
       .map((row) => sourceFromRow(row, conversationType))
       .reverse();
-    const initializationHistory = committedTurns.length === 0
+    const initializationHistory = shouldUseInitializationHistory({
+      epochOrdinal: epoch?.ordinal ?? 1,
+      committedTurnCount: committedTurns.length,
+      hasCompression: Boolean(epoch?.compression_output),
+    })
       ? selectInitializationHistory({
           messages: candidates,
           maxCount: historyCount,
@@ -1398,6 +1497,16 @@ export function createCognitionWorker({
         WHERE id = ${thoughtRun.streamId}
       `;
       await tx`
+        UPDATE messages
+        SET read_at = COALESCE(read_at, ${now})
+        WHERE conversation_id = ${thoughtRun.conversationId}
+          AND author_kind = 'user'
+          AND direction = 'inbound'
+          AND (created_at, id) <= (
+            ${thoughtRun.newMessageEndAt}, ${thoughtRun.newMessageEndId}
+          )
+      `;
+      await tx`
         INSERT INTO job_conversation_watermarks (
           job_id, conversation_id, last_message_at, last_message_id,
           last_success_run_id, updated_at
@@ -1814,7 +1923,9 @@ export function createCognitionWorker({
     const failure = error ? cognitionError(error) : null;
     const now = clock();
     const callId = randomUUID();
-    const requestMessages = result?.requestMessages ?? request.messages;
+    const requestPayload = result?.requestPayload ??
+      openAiCompatibleRequestPayload(configuration, request);
+    const requestMessages = requestPayload.messages;
     let provider = "openai-compatible";
     try {
       provider = new URL(configuration?.baseUrl).host;
@@ -1838,7 +1949,7 @@ export function createCognitionWorker({
           ${context.conversation.conversation_id}, ${run.correlation_id},
           ${request.profile}, ${provider},
           ${result?.model ?? configuration?.modelId ?? null},
-          ${request.promptVersion}, ${stableHash(requestMessages)},
+          ${request.promptVersion}, ${stableHash(requestPayload)},
           ${result ? stableHash(result.content) : null},
           ${failure ? "failed" : "succeeded"}, ${failure?.code ?? null},
           ${result?.latencyMs ?? null}, ${result?.inputTokens ?? projection?.inputTokens ?? null},
@@ -1855,6 +1966,16 @@ export function createCognitionWorker({
       `;
       const contextItems = [
         ...(projection?.contextItems ?? []),
+        {
+          itemType: "request_payload",
+          referenceId: request.promptVersion,
+          title: "Provider request JSON",
+          content: JSON.stringify(requestPayload),
+          metadata: {
+            section: "provider_request",
+            excludesHeaders: true,
+          },
+        },
         ...(request.tools ?? []).map((tool) => ({
           itemType: "tool_definition",
           referenceId: tool.function.name,
@@ -1865,6 +1986,13 @@ export function createCognitionWorker({
             schema: tool.function.parameters,
           },
         })),
+        ...(request.responseSchema ? [{
+          itemType: "response_schema",
+          referenceId: request.promptVersion,
+          title: "Structured output JSON Schema",
+          content: JSON.stringify(request.responseSchema),
+          metadata: { section: "output_contract" },
+        }] : []),
       ];
       for (const [ordinal, item] of contextItems.entries()) {
         await tx`
@@ -2031,6 +2159,16 @@ export function createCognitionWorker({
         FROM thought_runs AS thought
         WHERE thought.id = ${thoughtRunId} AND stream.id = thought.stream_id
       `;
+      if (run.job_type === "thought_tick") {
+        await tx`
+          UPDATE messages
+          SET read_at = COALESCE(read_at, ${now})
+          WHERE conversation_id = ${context.conversation.conversation_id}
+            AND author_kind = 'user'
+            AND direction = 'inbound'
+            AND (created_at, id) <= (${lastMessage.sent_at}, ${lastMessage.message_id})
+        `;
+      }
     });
     return metrics;
   }
