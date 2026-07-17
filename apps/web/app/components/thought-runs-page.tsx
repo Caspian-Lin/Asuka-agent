@@ -56,6 +56,7 @@ type ThoughtRun = {
   call_count: number;
   input_tokens: number;
   output_tokens: number;
+  cached_input_tokens: number;
   latency_ms: number;
   thought_count: number;
   candidate_count: number;
@@ -89,6 +90,7 @@ type LlmCall = {
   latency_ms: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
+  cached_input_tokens: number | null;
   request_context: ChatMessage[];
   response_json: {
     content?: string;
@@ -149,6 +151,12 @@ type ThoughtDetail = {
     };
     compiler_attempt_count: number;
     revision_count: number;
+    context_epoch_status: string;
+    compression_prompt_version: string | null;
+    covers_through_thought_run_id: string | null;
+    compression_input_tokens: number | null;
+    compression_output_tokens: number | null;
+    compression_cached_input_tokens: number | null;
   };
   calls: LlmCall[];
   outputs: Array<{
@@ -289,13 +297,17 @@ function AuditBadge({
 
 function CallStats({ call }: { call: Pick<
   LlmCall,
-  "created_at" | "model" | "provider" | "input_tokens" | "output_tokens" | "latency_ms"
+  "created_at" | "model" | "provider" | "input_tokens" | "output_tokens" |
+  "cached_input_tokens" | "latency_ms"
 > }) {
   return (
     <div className="audit-call-stats" aria-label="模型调用统计">
       <span>{formatDateTime(call.created_at)}</span>
       <span>{call.model ?? call.provider}</span>
       <span>{call.input_tokens ?? 0} 输入 / {call.output_tokens ?? 0} 输出 tokens</span>
+      {(call.cached_input_tokens ?? 0) > 0 && (
+        <span>{call.cached_input_tokens} cache 命中 tokens</span>
+      )}
       <span>{call.latency_ms ?? 0} ms</span>
     </div>
   );
@@ -858,6 +870,10 @@ export default function ThoughtRunsPage({
     () => (detail?.calls ?? []).filter((call) => call.purpose === "compiler"),
     [detail],
   );
+  const compressionCalls = useMemo(
+    () => (detail?.calls ?? []).filter((call) => call.purpose === "compression"),
+    [detail],
+  );
   const finalNaturalCall = useMemo(() => [...primaryContextCalls].reverse().find((call) => (
     call.status === "succeeded" &&
     Boolean(call.response_json?.content?.trim()) &&
@@ -1002,7 +1018,9 @@ export default function ThoughtRunsPage({
                         <dl className="thought-facts">
                           <div><dt>思绪上下文段</dt><dd>第 {detail.run.context_epoch_ordinal} 段</dd></div>
                           <div><dt>会话内 Thought</dt><dd>第 {detail.run.turn_ordinal} 次</dd></div>
-                          <div><dt>本次调用轮次</dt><dd>主模型 {primaryContextCalls.length} 次 · fast {compilerCalls.length} 次</dd></div>
+                          <div><dt>本次调用轮次</dt><dd>
+                            主模型 {primaryContextCalls.length} 次 · 压缩 {compressionCalls.length} 次 · fast {compilerCalls.length} 次
+                          </dd></div>
                           <div><dt>触发原因</dt><dd>{detail.run.trigger_reason}</dd></div>
                           <div><dt>开始时间</dt><dd>{formatDateTime(detail.run.started_at)}</dd></div>
                           <div><dt>结束时间</dt><dd>{formatDateTime(detail.run.completed_at)}</dd></div>
@@ -1010,12 +1028,63 @@ export default function ThoughtRunsPage({
                           <div><dt>新增消息</dt><dd>{contextOutline.currentMessages.length} 条</dd></div>
                           <div><dt>最终决策</dt><dd>{detail.run.decision ?? "没有动作"}</dd></div>
                           <div><dt>上下文状态</dt><dd>
-                            {detail.run.context_epoch_ordinal < detail.run.current_epoch_ordinal
-                              ? "重置前历史段" : "当前活动段"}
+                            {detail.run.context_epoch_status === "closed"
+                              ? "已关闭历史段" : "当前活动段"}
                           </dd></div>
+                          <div><dt>上下文段来源</dt><dd>
+                            {detail.run.compression_prompt_version
+                              ? `自动压缩 · ${detail.run.compression_prompt_version}`
+                              : detail.run.context_epoch_ordinal > 1
+                                ? "操作员重置后的空段"
+                                : "首次初始化段"}
+                          </dd></div>
+                          {detail.run.covers_through_thought_run_id && (
+                            <div><dt>压缩覆盖至</dt><dd>{detail.run.covers_through_thought_run_id}</dd></div>
+                          )}
+                          {detail.run.compression_prompt_version && (
+                            <div><dt>压缩用量</dt><dd>
+                              {detail.run.compression_input_tokens ?? 0} 输入 / {detail.run.compression_output_tokens ?? 0} 输出
+                              {` · cache ${detail.run.compression_cached_input_tokens ?? 0}`}
+                            </dd></div>
+                          )}
                         </dl>
                       </div>
                     </details>
+
+                    {compressionCalls.length > 0 && (
+                      <details className="audit-panel audit-primary-panel" open>
+                        <summary>
+                          <span className="audit-panel-title">
+                            <LuRefreshCw aria-hidden /><strong>上下文压缩</strong>
+                          </span>
+                          <span className="audit-summary-badges">
+                            <AuditBadge tone="execution">无可调用工具</AuditBadge>
+                            {detail.run.compression_prompt_version && (
+                              <AuditBadge tone="persisted">已原子切换 Epoch</AuditBadge>
+                            )}
+                          </span>
+                        </summary>
+                        <div className="audit-panel-body">
+                          <p className="audit-empty">
+                            压缩只读取旧 Epoch 已提交内容；本轮新增消息会在切换成功后进入新 Epoch。
+                          </p>
+                          <div className="audit-call-stack">
+                            {compressionCalls.map((call, index) => (
+                              <PrimaryCallNode
+                                key={call.id}
+                                call={call}
+                                calls={compressionCalls}
+                                ordinal={index + 1}
+                                isFinalOutput={
+                                  call.status === "succeeded" &&
+                                  call.prompt_version === detail.run.compression_prompt_version
+                                }
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      </details>
+                    )}
 
                     <details className="audit-panel audit-primary-panel" open>
                       <summary>
@@ -1063,7 +1132,20 @@ export default function ThoughtRunsPage({
                               <span className="audit-node-title"><strong>上一上下文段摘要</strong></span>
                               <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
                             </summary>
-                            <div className="audit-node-body"><p>{item.content}</p></div>
+                            <div className="audit-node-body">
+                              <p>{item.content}</p>
+                              <dl className="thought-facts">
+                                <div><dt>覆盖至 Thought</dt><dd>
+                                  {String(item.metadata.coversThroughThoughtRunId ?? "—")}
+                                </dd></div>
+                                <div><dt>压缩 token</dt><dd>
+                                  {String(item.metadata.inputTokens ?? 0)} 输入 / {String(item.metadata.outputTokens ?? 0)} 输出
+                                </dd></div>
+                                <div><dt>cache 命中</dt><dd>
+                                  {String(item.metadata.cachedInputTokens ?? 0)} tokens
+                                </dd></div>
+                              </dl>
+                            </div>
                           </details>
                         ))}
 

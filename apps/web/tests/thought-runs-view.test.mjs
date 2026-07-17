@@ -130,6 +130,10 @@ test("current run calls describe their stage instead of labeling every output as
     response_json: { content: "{}" },
   }), "编译动作候选");
   assert.equal(thoughtCallStageLabel({
+    purpose: "compression",
+    response_json: { content: "摘要" },
+  }), "压缩上下文");
+  assert.equal(thoughtCallStageLabel({
     purpose: "primary",
     status: "failed",
     error_code: "timeout",

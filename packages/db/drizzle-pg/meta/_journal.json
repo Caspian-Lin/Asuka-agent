@@ -71,6 +71,13 @@
       "when": 1784135936248,
       "tag": "0009_famous_legion",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1784268370814,
+      "tag": "0010_brief_hulk",
+      "breakpoints": true
     }
   ]
 }

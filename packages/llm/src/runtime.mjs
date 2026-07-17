@@ -271,6 +271,17 @@ function normalizeToolCalls(value) {
   });
 }
 
+function cachedInputTokens(usage) {
+  const candidates = [
+    usage?.prompt_tokens_details?.cached_tokens,
+    usage?.input_tokens_details?.cached_tokens,
+    usage?.prompt_cache_hit_tokens,
+    usage?.cache_read_input_tokens,
+  ];
+  const value = candidates.find((candidate) => Number.isFinite(candidate));
+  return value == null ? undefined : Number(value);
+}
+
 async function providerErrorDetail(response) {
   try {
     const payload = await response.json();
@@ -369,6 +380,7 @@ export class OpenAiCompatibleProvider {
       outputTokens: Number.isFinite(payload?.usage?.completion_tokens)
         ? payload.usage.completion_tokens
         : undefined,
+      cachedInputTokens: cachedInputTokens(payload?.usage),
       latencyMs,
       requestMessages,
       requestPayload,

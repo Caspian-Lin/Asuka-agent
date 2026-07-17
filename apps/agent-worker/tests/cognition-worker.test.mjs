@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { LlmConfigurationError } from "@asuka-agent/llm/runtime";
+import { ThoughtCompressionError } from "@asuka-agent/agent-core/thought-compression";
 import {
   committedToolTraceMessages,
   cognitionError,
   cognitionTriggerReason,
+  effectiveContextWindow,
   nextRunAt,
   retryDelayMs,
   thoughtEpochIdFor,
@@ -46,7 +48,23 @@ test("only transient provider failures retry with bounded backoff", () => {
   assert.equal(cognitionError(
     new LlmConfigurationError("provider_output_exhausted", "budget", 502),
   ).retryable, false);
+  assert.deepEqual(cognitionError(
+    new ThoughtCompressionError("compression_tool_call_rejected", "forged", true),
+  ), {
+    code: "compression_tool_call_rejected",
+    message: "forged",
+    retryable: true,
+  });
   assert.deepEqual([1, 2, 9].map(retryDelayMs), [15_000, 30_000, 300_000]);
+});
+
+test("context budgeting honors the lower configured or provider limit", () => {
+  assert.equal(effectiveContextWindow(128_000, 32_000), 32_000);
+  assert.equal(effectiveContextWindow(32_000), 32_000);
+  assert.throws(
+    () => effectiveContextWindow(128_000, 512),
+    (error) => error.code === "budget_invalid",
+  );
 });
 
 test("thought runs keep stable identity and explicit trigger provenance", () => {

@@ -13,6 +13,8 @@ const compilerMigrationUrl = new URL(
 );
 const outboundSnapshotUrl = new URL("../drizzle-pg/meta/0009_snapshot.json", import.meta.url);
 const outboundMigrationUrl = new URL("../drizzle-pg/0009_famous_legion.sql", import.meta.url);
+const compressionSnapshotUrl = new URL("../drizzle-pg/meta/0010_snapshot.json", import.meta.url);
+const compressionMigrationUrl = new URL("../drizzle-pg/0010_brief_hulk.sql", import.meta.url);
 
 test("thought stream migration exposes the recoverable v2 contracts", async () => {
   const snapshot = JSON.parse(await readFile(snapshotUrl, "utf8"));
@@ -91,4 +93,19 @@ test("autonomous speech uses a durable decision and single outbound queue", asyn
   const migration = await readFile(outboundMigrationUrl, "utf8");
   assert.match(migration, /'agent-asuka', false, 'Asia\/Shanghai'/);
   assert.doesNotMatch(migration, /UPDATE\s+"?(?:messages|thought_runs|action_proposals)"?/i);
+});
+
+test("compression records provider cache usage without migrating old thought data", async () => {
+  const snapshot = JSON.parse(await readFile(compressionSnapshotUrl, "utf8"));
+  const tables = snapshot.tables;
+  assert.equal(
+    tables["public.llm_calls"].columns.cached_input_tokens.notNull,
+    false,
+  );
+  assert.equal(
+    tables["public.thought_stream_epochs"].columns.cached_input_tokens.notNull,
+    false,
+  );
+  const migration = await readFile(compressionMigrationUrl, "utf8");
+  assert.doesNotMatch(migration, /\b(?:UPDATE|INSERT INTO)\s+"?(?:llm_calls|thought_stream_epochs)"?/i);
 });
