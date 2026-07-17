@@ -183,3 +183,113 @@ test("the same message window keeps stable output idempotency despite model drif
     nextCandidate,
   );
 });
+
+test("global consolidation compares the same subject across source conversations", () => {
+  const context = buildSpeakerContext({
+    conversation: {
+      id: "private:second",
+      title: "第二个会话",
+      channel: "napcat",
+      externalId: "private:user-a",
+      type: "private",
+    },
+    participants: [{ participantId: "A", displayName: "小林", aliases: [] }],
+    messages: [{
+      id: "m-new",
+      senderId: "A",
+      senderDisplayName: "小林",
+      createdAt: "2026-07-17T00:00:00Z",
+      content: "我现在更喜欢古典乐",
+    }],
+    existingCandidates: [{
+      id: "memory-old",
+      sourceConversationId: "group:first",
+      subjectId: "A",
+      sourceSpeakerId: "A",
+      claim: "A 喜欢爵士乐",
+      memoryType: "preference",
+      sensitivity: "normal",
+      disclosurePolicy: {
+        scope: "subject",
+        conversationIds: [],
+        participantIds: [],
+      },
+      validFrom: null,
+      validTo: null,
+      attributionStatus: "resolved",
+      status: "active",
+    }],
+  });
+  const [candidate] = validateMemoryOutput({
+    candidates: [{
+      operation: "update",
+      memoryType: "preference",
+      subjectId: "A",
+      sourceSpeakerId: "A",
+      claim: "A 现在更喜欢古典乐",
+      evidenceMessageIds: ["m-new"],
+      confidence: 0.9,
+      attributionStatus: "resolved",
+      sensitivity: "normal",
+      disclosurePolicy: {
+        scope: "subject",
+        conversationIds: [],
+        participantIds: [],
+      },
+      validFrom: null,
+      validTo: null,
+      targetCandidateId: "memory-old",
+    }],
+  }, context, { thoughtRunId: "thought-new", promptVersion: "memory-v2" });
+  assert.equal(context.existing_candidates[0].source_conversation_id, "group:first");
+  assert.equal(candidate.sourceConversationId, "private:second");
+  assert.equal(candidate.targetCandidateId, "memory-old");
+  assert.equal(candidate.diff.before.claim, "A 喜欢爵士乐");
+  assert.equal(candidate.diff.after.claim, "A 现在更喜欢古典乐");
+});
+
+test("consolidation cannot target another subject even when both are participants", () => {
+  const context = contextFixture();
+  context.existing_candidates.push({
+    candidate_id: "memory-a",
+    source_conversation_id: "group:old",
+    subject_id: "A",
+    source_speaker_id: "A",
+    claim: "A 喜欢爵士乐",
+    memory_type: "preference",
+    sensitivity: "normal",
+    disclosure_policy: {
+      scope: "subject",
+      conversationIds: [],
+      participantIds: [],
+    },
+    valid_from: null,
+    valid_to: null,
+    attribution_status: "resolved",
+    status: "active",
+  });
+  assert.throws(
+    () => validateMemoryOutput({
+      candidates: [{
+        operation: "conflict",
+        memoryType: "preference",
+        subjectId: "B",
+        sourceSpeakerId: "B",
+        claim: "B 不喜欢爵士乐",
+        evidenceMessageIds: ["m2"],
+        confidence: 0.9,
+        attributionStatus: "resolved",
+        sensitivity: "normal",
+        disclosurePolicy: {
+          scope: "subject",
+          conversationIds: [],
+          participantIds: [],
+        },
+        validFrom: null,
+        validTo: null,
+        targetCandidateId: "memory-a",
+      }],
+    }, context),
+    (error) => error.code === "memory_subject_mismatch",
+  );
+});

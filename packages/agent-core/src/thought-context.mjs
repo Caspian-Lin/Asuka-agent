@@ -242,6 +242,8 @@ function memoryEntry(memory) {
       source_speaker_id: memory.sourceSpeakerId ?? null,
       sensitivity: memory.sensitivity ?? "normal",
       evidence_ids: memory.evidenceIds ?? [],
+      valid_from: memory.validFrom ?? null,
+      valid_to: memory.validTo ?? null,
     }),
     String(memory.content),
   ].join("\n");
@@ -258,7 +260,12 @@ function memoryEntry(memory) {
         sourceSpeakerId: memory.sourceSpeakerId ?? null,
         sensitivity: memory.sensitivity ?? "normal",
         evidenceIds: memory.evidenceIds ?? [],
+        sourceConversationId: memory.sourceConversationId ?? null,
+        thoughtRunId: memory.thoughtRunId ?? null,
+        validFrom: memory.validFrom ?? null,
+        validTo: memory.validTo ?? null,
         relevance: Number(memory.relevance ?? 0),
+        disclosureDecision: memory.disclosureDecision,
       },
     }),
   };
@@ -351,6 +358,9 @@ export function projectThoughtContext({
     sourceEntry(source, "initialization_history")
   ));
   const memoryEntries = [...recalledMemories]
+    .filter((memory) => (
+      memory.disclosureDecision === "allowed" && memory.meetsThreshold === true
+    ))
     .sort((left, right) => Number(right.relevance ?? 0) - Number(left.relevance ?? 0))
     .map(memoryEntry);
 
@@ -383,7 +393,7 @@ export function projectThoughtContext({
         newMessageStartId: chunk.entries[0].item.referenceId,
         newMessageEndId: chunk.entries.at(-1).item.referenceId,
         omittedHistoryCount: historyEntries.length - history.selected.length,
-        omittedMemoryCount: memoryEntries.length - memories.selected.length,
+        omittedMemoryCount: recalledMemories.length - memories.selected.length,
       };
     }),
     totalNewMessageTokens: sumEntryTokens(newEntries),

@@ -83,6 +83,24 @@ export const actionProposalStatus = pgEnum("action_proposal_status", [
   "cancelled",
 ]);
 
+export const memorySensitivity = pgEnum("memory_sensitivity", [
+  "public",
+  "normal",
+  "sensitive",
+  "restricted",
+]);
+
+export const memoryRetrievalMode = pgEnum("memory_retrieval_mode", [
+  "passive",
+  "tool",
+]);
+
+export const memoryRetrievalDecision = pgEnum("memory_retrieval_decision", [
+  "returned",
+  "filtered",
+  "below_threshold",
+]);
+
 export const speechDecisionOutcome = pgEnum("speech_decision_outcome", [
   "silent",
   "defer",
@@ -570,13 +588,23 @@ export const memoryCandidates = pgTable(
       .references(() => thoughtRuns.id, { onDelete: "cascade" }),
     idempotencyKey: text("idempotency_key").notNull(),
     operation: text("operation").notNull(),
+    memoryType: text("memory_type").notNull().default("fact"),
     subjectId: text("subject_id"),
     sourceSpeakerId: text("source_speaker_id").notNull(),
     claim: text("claim").notNull(),
     evidenceMessageIds: jsonb("evidence_message_ids").notNull(),
     confidenceMillis: integer("confidence_millis").notNull(),
     attributionStatus: text("attribution_status").notNull(),
+    sensitivity: memorySensitivity("sensitivity").notNull().default("normal"),
+    disclosurePolicy: jsonb("disclosure_policy").notNull().default({
+      scope: "subject",
+      conversationIds: [],
+      participantIds: [],
+    }),
+    validFrom: timestamp("valid_from", { withTimezone: true }),
+    validTo: timestamp("valid_to", { withTimezone: true }),
     targetCandidateId: text("target_candidate_id"),
+    diff: jsonb("diff").notNull().default({}),
     status: text("status").notNull().default("pending_review"),
     promptVersion: text("prompt_version").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
@@ -588,12 +616,74 @@ export const memoryCandidates = pgTable(
       table.conversationId,
       table.createdAt,
     ),
-    index("memory_candidates_subject_idx").on(
-      table.conversationId,
+    index("memory_candidates_agent_subject_idx").on(
+      table.agentId,
       table.subjectId,
       table.status,
     ),
+    index("memory_candidates_target_idx").on(table.targetCandidateId),
     index("memory_candidates_thought_run_idx").on(table.thoughtRunId),
+  ],
+);
+
+/** One auditable global-memory query, including empty and fully denied results. */
+export const memoryRetrievalAudits = pgTable(
+  "memory_retrieval_audits",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    thoughtRunId: text("thought_run_id")
+      .notNull()
+      .references(() => thoughtRuns.id, { onDelete: "cascade" }),
+    mode: memoryRetrievalMode("mode").notNull(),
+    query: text("query").notNull(),
+    queryHash: text("query_hash").notNull(),
+    requestedLimit: integer("requested_limit").notNull(),
+    minimumRelevanceMillis: integer("minimum_relevance_millis").notNull(),
+    candidateCount: integer("candidate_count").notNull(),
+    filteredCount: integer("filtered_count").notNull(),
+    returnedCount: integer("returned_count").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    index("memory_retrieval_audits_thought_idx").on(
+      table.thoughtRunId,
+      table.createdAt,
+    ),
+    index("memory_retrieval_audits_conversation_idx").on(
+      table.conversationId,
+      table.createdAt,
+    ),
+  ],
+);
+
+/** Per-memory policy and threshold outcome for a retrieval audit. */
+export const memoryRetrievalItems = pgTable(
+  "memory_retrieval_items",
+  {
+    auditId: text("audit_id")
+      .notNull()
+      .references(() => memoryRetrievalAudits.id, { onDelete: "cascade" }),
+    memoryCandidateId: text("memory_candidate_id")
+      .notNull()
+      .references(() => memoryCandidates.id, { onDelete: "cascade" }),
+    decision: memoryRetrievalDecision("decision").notNull(),
+    reasonCode: text("reason_code").notNull(),
+    relevanceMillis: integer("relevance_millis"),
+    rank: integer("rank"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.auditId, table.memoryCandidateId] }),
+    index("memory_retrieval_items_memory_idx").on(
+      table.memoryCandidateId,
+      table.createdAt,
+    ),
   ],
 );
 

@@ -5,6 +5,8 @@
   "type": "module",
   "exports": {
     "./action-compiler": "./src/action-compiler.mjs",
+    "./memory-proposal": "./src/memory-proposal.mjs",
+    "./memory-retrieval": "./src/memory-retrieval.mjs",
     "./outbound-policy": "./src/outbound-policy.mjs",
     "./primary-thought": "./src/primary-thought.mjs",
     "./scheduled-cognition": "./src/scheduled-cognition.mjs",

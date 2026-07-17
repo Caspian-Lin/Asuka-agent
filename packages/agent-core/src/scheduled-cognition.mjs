@@ -4,9 +4,10 @@ import {
   PRIMARY_THOUGHT_SYSTEM_PROMPT,
   primaryThoughtRequest,
 } from "./primary-thought.mjs";
+import { buildMemoryProposal } from "./memory-proposal.mjs";
 
 export const THOUGHT_PROMPT_VERSION = PRIMARY_THOUGHT_PROMPT_VERSION;
-export const MEMORY_PROMPT_VERSION = "memory-v1";
+export const MEMORY_PROMPT_VERSION = "memory-v2-global-disclosure";
 
 const memorySchema = Object.freeze({
   type: "object",
@@ -21,16 +22,28 @@ const memorySchema = Object.freeze({
         additionalProperties: false,
         required: [
           "operation",
+          "memoryType",
           "subjectId",
           "sourceSpeakerId",
           "claim",
           "evidenceMessageIds",
           "confidence",
           "attributionStatus",
+          "sensitivity",
+          "disclosurePolicy",
+          "validFrom",
+          "validTo",
           "targetCandidateId",
         ],
         properties: {
-          operation: { type: "string", enum: ["create", "update", "conflict"] },
+          operation: {
+            type: "string",
+            enum: ["create", "duplicate", "update", "conflict"],
+          },
+          memoryType: {
+            type: "string",
+            enum: ["preference", "goal", "profile", "prospective", "fact", "lesson"],
+          },
           subjectId: { type: ["string", "null"] },
           sourceSpeakerId: { type: "string" },
           claim: { type: "string" },
@@ -42,6 +55,33 @@ const memorySchema = Object.freeze({
           },
           confidence: { type: "number", minimum: 0, maximum: 1 },
           attributionStatus: { type: "string", enum: ["resolved", "unresolved"] },
+          sensitivity: {
+            type: "string",
+            enum: ["public", "normal", "sensitive", "restricted"],
+          },
+          disclosurePolicy: {
+            type: "object",
+            additionalProperties: false,
+            required: ["scope", "conversationIds", "participantIds"],
+            properties: {
+              scope: {
+                type: "string",
+                enum: ["public", "subject", "private", "allowlist"],
+              },
+              conversationIds: {
+                type: "array",
+                maxItems: 100,
+                items: { type: "string" },
+              },
+              participantIds: {
+                type: "array",
+                maxItems: 100,
+                items: { type: "string" },
+              },
+            },
+          },
+          validFrom: { type: ["string", "null"] },
+          validTo: { type: ["string", "null"] },
           targetCandidateId: { type: ["string", "null"] },
         },
       },
@@ -185,6 +225,16 @@ export function buildSpeakerContext({ conversation, participants, messages, exis
       claim: String(candidate.claim),
       attribution_status: String(candidate.attributionStatus),
       status: String(candidate.status),
+      source_conversation_id: String(
+        candidate.sourceConversationId ?? candidate.conversationId ?? conversation.id,
+      ),
+      memory_type: String(candidate.memoryType ?? "fact"),
+      sensitivity: String(candidate.sensitivity ?? "normal"),
+      disclosure_policy: candidate.disclosurePolicy ?? null,
+      valid_from: candidate.validFrom == null
+        ? null
+        : new Date(candidate.validFrom).toISOString(),
+      valid_to: candidate.validTo == null ? null : new Date(candidate.validTo).toISOString(),
     })),
   };
 }
@@ -206,7 +256,9 @@ export function cognitionRequest(jobType, contextPack) {
       messages: [
         {
           role: "system",
-          content: `You generate reviewable memory candidates from shared multi-party conversation evidence.${identityProtocol}${memoryExamples}\nNever activate or overwrite facts. Return create, update, or conflict proposals only. Prefer no candidate over uncertain attribution.`,
+          content: `You generate reviewable Agent-global memory proposals from shared multi-party conversation evidence.${identityProtocol}${memoryExamples}
+Compare the current evidence with every supplied existing candidate for the same stable subject even when source_conversation_id differs. Return create, duplicate, update, or conflict proposals. A non-create operation must reference one targetCandidateId for the same subject. Never activate, overwrite, archive, or supersede the target row; the server will persist a separate proposal and diff.
+Choose the narrowest disclosure policy. Health, allergy, diagnosis, medication, pregnancy, disability, and mental-health facts must use sensitivity=restricted and default to scope=private unless an explicit allowlist is present. Preserve real-world validity when it is explicit; otherwise use null. Prefer no candidate over uncertain attribution.`,
         },
         { role: "user", content: serialized },
       ],
@@ -258,7 +310,7 @@ export function validateThoughtOutput(output, contextPack, now = new Date()) {
   };
 }
 
-export function validateMemoryOutput(output, contextPack) {
+export function validateMemoryOutput(output, contextPack, provenance = {}) {
   if (!Array.isArray(output?.candidates) || output.candidates.length > 10) {
     throw new CognitionValidationError("invalid_output", "记忆候选列表无效");
   }
@@ -266,11 +318,24 @@ export function validateMemoryOutput(output, contextPack) {
     contextPack.participants.map((participant) => participant.participant_id),
   );
   const messageById = new Map(contextPack.messages.map((message) => [message.message_id, message]));
-  const existingIds = new Set(
-    contextPack.existing_candidates.map((candidate) => candidate.candidate_id),
+  const existingById = new Map(
+    contextPack.existing_candidates.map((candidate) => [candidate.candidate_id, {
+      id: candidate.candidate_id,
+      conversationId: candidate.source_conversation_id,
+      subjectId: candidate.subject_id,
+      sourceSpeakerId: candidate.source_speaker_id,
+      claim: candidate.claim,
+      memoryType: candidate.memory_type ?? "fact",
+      sensitivity: candidate.sensitivity ?? "normal",
+      disclosurePolicy: candidate.disclosure_policy,
+      validFrom: candidate.valid_from,
+      validTo: candidate.valid_to,
+      attributionStatus: candidate.attribution_status,
+      status: candidate.status,
+    }]),
   );
   return output.candidates.map((candidate) => {
-    if (!["create", "update", "conflict"].includes(candidate?.operation)) {
+    if (!["create", "duplicate", "update", "conflict"].includes(candidate?.operation)) {
       throw new CognitionValidationError("invalid_output", "记忆候选 operation 无效");
     }
     const sourceSpeakerId = String(candidate.sourceSpeakerId ?? "");
@@ -303,19 +368,28 @@ export function validateMemoryOutput(output, contextPack) {
     if (candidate.operation === "create" && targetCandidateId !== null) {
       throw new CognitionValidationError("invalid_output", "新增候选不得指定 target");
     }
-    if (candidate.operation !== "create" && !existingIds.has(targetCandidateId)) {
+    if (candidate.operation !== "create" && !existingById.has(targetCandidateId)) {
       throw new CognitionValidationError("invalid_output", "更新或冲突必须引用已有候选");
     }
-    return {
+    return buildMemoryProposal({
       operation: candidate.operation,
+      memoryType: candidate.memoryType ?? "fact",
       subjectId,
       sourceSpeakerId,
+      sourceConversationId: contextPack.conversation.conversation_id,
+      thoughtRunId: provenance.thoughtRunId ?? "unpersisted-memory-consolidation",
       claim: boundedText(candidate.claim, "记忆 claim", 600),
       evidenceMessageIds,
       confidenceMillis: confidenceMillis(candidate.confidence),
       attributionStatus,
+      sensitivity: candidate.sensitivity ?? "normal",
+      disclosurePolicy: candidate.disclosurePolicy,
+      validFrom: candidate.validFrom ?? null,
+      validTo: candidate.validTo ?? null,
       targetCandidateId,
-    };
+      existingCandidates: [...existingById.values()],
+      promptVersion: provenance.promptVersion ?? MEMORY_PROMPT_VERSION,
+    });
   });
 }
 

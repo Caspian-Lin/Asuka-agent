@@ -108,6 +108,30 @@ test("memory proposal validates source speaker against message evidence", () => 
   );
 });
 
+test("memory compiler cannot downgrade health facts below restricted", () => {
+  const healthInput = buildCompilerInput({
+    thoughtRunId: "thought-health",
+    primaryOutput: "小林对花生过敏。",
+    conversation: { id: "group:1", type: "group" },
+    participants: [{ id: "A", displayName: "小林" }],
+    references: [{ type: "message", id: "m1", senderId: "A" }],
+  });
+  const result = validateCompilerOutput({
+    status: "accepted",
+    revisionReasons: [],
+    actions: [action({
+      type: "memory",
+      content: "小林对花生过敏。",
+      targetConversationId: null,
+      replyToMessageId: null,
+      subjectId: "A",
+      sourceSpeakerId: "A",
+      sensitivity: "normal",
+    })],
+  }, healthInput);
+  assert.equal(result.actions[0].sensitivity, "restricted");
+});
+
 test("needs_revision and no_action are distinct successful protocols", () => {
   assert.deepEqual(validateCompilerOutput({
     status: "needs_revision",

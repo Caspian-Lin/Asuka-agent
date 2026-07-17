@@ -1,10 +1,10 @@
 # Asuka Agent：需求与开发设计文档
 
-> 文档版本：0.6.5（会话级思绪压缩）
+> 文档版本：0.6.6（Agent 全局记忆提案与披露边界）
 >
 > 更新时间：2026-07-17
 >
-> 状态：NapCat QQ 双向接入、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、Epoch 自动压缩/恢复、primary 自然思绪/只读工具循环、fast 动作编译和受硬策略控制的自主外发已实现；正式记忆召回继续按依赖链实现
+> 状态：NapCat QQ 双向接入、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、Epoch 自动压缩/恢复、primary/fast 分层、自主外发，以及 Agent 全局记忆提案、披露过滤和可审计召回端口已实现；正式审核激活状态机与混合检索继续按依赖链实现
 >
 > 配套实现：`Asuka Agent`
 
@@ -94,7 +94,7 @@ flowchart TD
 7. 低置信阈值拒答；
 8. 返回记忆及其原始证据。
 
-当前阶段不引入向量服务和图数据库，也不宣称已经完成召回。现有 worker 只从新增消息生成带证据的 `memory_candidates`；正式记忆库、激活审核、混合召回和上下文注入将在独立里程碑实现。
+当前阶段不引入向量服务和图数据库。现有 worker 从新增消息生成带证据和披露契约的 `memory_candidates`，在 Agent 全局范围比较同一 stable subject，并提供完全可检查的词法召回端口；只有显式 `active`、有效且通过参与者/权限/敏感度/披露策略的记录才可进入 Thought。正式审核激活状态机与 BM25/vector/graph 混合召回仍在后续里程碑实现。
 
 ## 3. 研究与可参考项目
 
@@ -179,10 +179,10 @@ flowchart TD
 - 候选保存原始 message evidence、操作类型、置信度和 prompt version；
 - 当前只生成 `pending_review` 候选，不自动激活或覆盖事实。
 
-#### FR-04 正式记忆召回（暂缓）
+#### FR-04 正式记忆召回（基础端口已完成，审核与混合排序暂缓）
 
-- 当前 PostgreSQL 链路尚无 active memory store，也不执行记忆召回；
-- 后续只检索已审核、有效且权限匹配的记忆；
+- 当前 PostgreSQL 链路已有 Agent 全局 retrieval port；普通流程不会自动把 proposal 激活；
+- 端口只读取显式 `active`、有效且权限匹配的记录，`pending_review` 永不参与召回；
 - 召回必须作为 Thought Run 的一个可见步骤，记录 query、命中、分数和证据；
 - 无可靠结果时返回空，不用低相关记忆凑上下文。
 
@@ -364,7 +364,9 @@ operational_thought_created
 - “用户喜欢深色 UI”与“用户今天想看深色 UI”不能合并；
 - 新事实与旧事实冲突时，不覆盖旧行：关闭旧 `valid_to`，创建新行和 `updates/contradicts` link。
 
-当前实际表为 `memory_candidates`：保存 `thought_run_id`、`operation`、`subject_id`、`source_speaker_id`、`claim`、`evidence_message_ids`、置信度、归因状态和 `pending_review` 状态。候选不会参与召回；正式记忆审核与物化将在后续 migration 实现。
+当前实际表为 `memory_candidates`：保存 `thought_run_id`、source conversation/speaker、`subject_id`、原始 message evidence、`operation=create/duplicate/update/conflict`、memory type、置信度、归因状态、敏感度、disclosure policy、有效期、target 和不可变 diff。更新/冲突只新增 `pending_review` proposal，不改写 target。普通流程不会自动激活；retrieval port 只读取显式 `active` 的记录，正式审核/物化状态机仍在后续 migration 实现。
+
+`memory_retrieval_audits` 保存 passive/tool 查询、阈值、候选/过滤/返回计数；`memory_retrieval_items` 保存每条记录的 `returned/filtered/below_threshold`、原因、分数和排名。空召回和全部拒绝同样留下 audit，Thought context projector 还会再次拒绝未标记为 allowed 或未达到阈值的输入。
 
 ### 8.4 证据与关系
 
@@ -472,7 +474,7 @@ outbound_deliveries  平台 message id、状态、撤回信息
 agent_runs           父/子 Agent 运行树、预算、状态
 ```
 
-当前已通过 PostgreSQL migration 实现 `channels`、`inbound_deliveries`、`jobs`、`job_runs`、`llm_profile_settings`、`conversation_participants`、`job_conversation_watermarks`、`thought_streams`、`thought_stream_epochs`、`thought_runs`、`llm_calls`、`llm_call_context_items` 与 `action_proposals`；`operational_thoughts` 和 `memory_candidates` 仅保留旧 MVP 数据契约。`thought_stream_epochs` 保存压缩覆盖边界、完整输出、prompt version、输入/输出/cache token；内部测试数据不做旧思绪回填。`messages` 已包含 unread、稳定说话人、author/direction、当时显示名、回复目标和平台消息身份。所有模型调用和 proposal 必须关联 Thought Run，proposal 不等于 effect。`outbound_*`、正式记忆和子 Agent 表仍未开放。IM 会话通过正式 `channel_id` 外键归属 Channel；禁止解析拼接 ID 代替关系。模型配置以 `(agent_id, profile)` 为主键，profile 仅允许 `primary | fast`；API Key 使用服务端 `SETTINGS_ENCRYPTION_KEY` 加密，数据库只保存 AES-256-GCM envelope。
+当前已通过 PostgreSQL migration 实现 `channels`、`inbound_deliveries`、`jobs`、`job_runs`、`llm_profile_settings`、`conversation_participants`、`job_conversation_watermarks`、`thought_streams`、`thought_stream_epochs`、`thought_runs`、`llm_calls`、`llm_call_context_items`、`action_proposals`、完整 `memory_candidates` proposal 契约、`memory_retrieval_audits/items` 与自主外发数据表。`thought_stream_epochs` 保存压缩覆盖边界、完整输出、prompt version、输入/输出/cache token；内部测试数据不做旧思绪回填。`messages` 已包含 unread、稳定说话人、author/direction、当时显示名、回复目标和平台消息身份。所有模型调用和 proposal 必须关联 Thought Run，proposal 不等于 effect。正式记忆审核状态机和子 Agent 表仍未开放。IM 会话通过正式 `channel_id` 外键归属 Channel；禁止解析拼接 ID 代替关系。模型配置以 `(agent_id, profile)` 为主键，profile 仅允许 `primary | fast`；API Key 使用服务端 `SETTINGS_ENCRYPTION_KEY` 加密，数据库只保存 AES-256-GCM envelope。
 
 ## 9. API 设计
 
@@ -709,6 +711,8 @@ primary 应被稳定 system instruction 定义为 Asuka，而不是“扮演 Asu
 主模型可以积极寻找与群成员互动的价值，但不得把“每轮必须说话”作为目标。fast 编译器的 `no_action` 必须能正常完成 Turn。reply/memory/task 只生成 proposal；实际发送、激活或其他副作用继续由独立策略门和 executor 处理。
 
 记忆不按 Thought Stream 或 conversation 建立物理孤岛。Thought Turn 可以提出带证据的 memory proposal，后台 consolidation 在 Agent 全局范围去重、冲突分析和 supersede；召回时再根据任务相关性与 disclosure policy 投影到当前会话。
+
+完整 proposal、敏感度、披露矩阵、retrieval port 与开源方案取舍见 [`docs/memory-proposals-and-retrieval.md`](memory-proposals-and-retrieval.md)。
 
 ### 12.6 自主发言当前协议
 
@@ -989,13 +993,13 @@ outbound_duplicate_prevented
 | 风险 | 当前控制 | 下一步 |
 |---|---|---|
 | 规则抽取误判 | 候选需人工接受 | LLM extractor + schema validation + precision 评测 |
-| 正式召回尚未实现 | 候选不参与上下文 | 审核后实现 BM25/vector/graph 混合召回 |
+| 正式审核状态机尚未实现 | pending proposal 不参与上下文；端口只读显式 active | 增加审核/物化后再接 BM25/vector/graph 混合召回 |
 | 记忆越来越多 | status、归档、原子化 | 后台 consolidation proposal + 分层上下文 |
 | 频繁主动打扰 | 默认总开关关闭；Shadow、硬预算、静默、冷却、去重 | 积累反馈后评估高 precision 分类器 |
-| 记忆召回尚未实现 | UI 明确只展示候选 | 审核状态机 + PostgreSQL/pgvector，必要时 Graphiti |
+| 当前召回仅词法基线 | 阈值拒绝、披露硬过滤与完整 audit | 审核状态机 + PostgreSQL/pgvector，必要时接可修改的开源图实现 |
 | 单轮 JSON 思绪过于僵硬 | 保留完整调用审计 | primary 自然认知 + fast 结构化动作编译 |
 | 跨 trigger 无会话短期记忆 | 已有 per-conversation watermark | Thought Stream/epoch + 追加式上下文 + 有界压缩 |
-| 工具能力有限 | 已开放有界只读 memory/message/source tools | 正式记忆库后完善召回；副作用仍只生成 proposal |
+| 工具能力有限 | 已开放有界只读 memory/message/source tools | 激活审核后完善混合召回；副作用仍只生成 proposal |
 | Asuka 自身消息不在入站历史 | Gateway 拒绝 self event | outbound 先持久化 `author_kind=agent`，平台回显幂等去重 |
 | 外部内容注入 | Phase 1 无外部抓取 | taint、白名单、最小权限、安全回归 |
 | 评测样本太少 | 明确标记 smoke suite | 引入错误回归集与公开 benchmark |

@@ -179,6 +179,8 @@ test("projection keeps stable order and exact auditable context items", () => {
       subjectId: "user-a",
       evidenceIds: ["old-1"],
       relevance: 0.8,
+      disclosureDecision: "allowed",
+      meetsThreshold: true,
     }],
     newMessages: [source("new-1")],
     contextWindow: 2_000,
@@ -216,6 +218,33 @@ test("projection keeps stable order and exact auditable context items", () => {
   assert.match(projection.messages[1].content, /上一上下文段摘要/);
   assert.equal(projection.newMessageStartId, "new-1");
   assert.equal(projection.newMessageEndId, "new-1");
+});
+
+test("projection defensively excludes denied or below-threshold memories", () => {
+  const projection = projectThoughtContext({
+    systemMessages,
+    recalledMemories: [{
+      memoryId: "restricted-denied",
+      content: "user-a 对花生过敏",
+      subjectId: "user-a",
+      relevance: 0.95,
+      disclosureDecision: "denied",
+      meetsThreshold: true,
+    }, {
+      memoryId: "weak",
+      content: "弱相关候选",
+      subjectId: "user-a",
+      relevance: 0.05,
+      disclosureDecision: "allowed",
+      meetsThreshold: false,
+    }],
+    newMessages: [source("new-secure")],
+    contextWindow: 2_000,
+    reservedOutputTokens: 200,
+    reservedToolResultTokens: 100,
+  }).chunks[0];
+  assert.equal(projection.contextItems.some((item) => item.itemType === "memory"), false);
+  assert.equal(projection.omittedMemoryCount, 2);
 });
 
 test("large new-message batches split in order without omission or duplication", () => {
