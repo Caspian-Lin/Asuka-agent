@@ -628,6 +628,7 @@ async function listThoughtRuns() {
            COALESCE(call_stats.call_count, 0)::int AS call_count,
            COALESCE(call_stats.input_tokens, 0)::int AS input_tokens,
            COALESCE(call_stats.output_tokens, 0)::int AS output_tokens,
+           COALESCE(call_stats.cached_input_tokens, 0)::int AS cached_input_tokens,
            COALESCE(call_stats.latency_ms, 0)::int AS latency_ms,
            COALESCE(output_stats.thought_count, 0)::int AS thought_count,
            COALESCE(output_stats.candidate_count, 0)::int AS candidate_count
@@ -641,6 +642,7 @@ async function listThoughtRuns() {
       SELECT count(*) AS call_count,
              sum(COALESCE(input_tokens, 0)) AS input_tokens,
              sum(COALESCE(output_tokens, 0)) AS output_tokens,
+             sum(COALESCE(cached_input_tokens, 0)) AS cached_input_tokens,
              sum(COALESCE(latency_ms, 0)) AS latency_ms
       FROM llm_calls call
       WHERE call.thought_run_id = thought.id
@@ -665,6 +667,12 @@ async function getThoughtRunDetail(thoughtRunId) {
            run.attempt_count AS job_attempt_count,
            run.max_attempts AS job_max_attempts,
            epoch.ordinal AS context_epoch_ordinal,
+           epoch.status AS context_epoch_status,
+           epoch.compression_prompt_version,
+           epoch.covers_through_thought_run_id,
+           epoch.input_tokens AS compression_input_tokens,
+           epoch.output_tokens AS compression_output_tokens,
+           epoch.cached_input_tokens AS compression_cached_input_tokens,
            stream.status AS stream_status,
            stream.current_epoch_ordinal,
            stream.committed_message_at, stream.updated_at AS stream_updated_at
@@ -684,6 +692,7 @@ async function getThoughtRunDetail(thoughtRunId) {
              call.model, call.prompt_version, call.status, call.error_code,
              call.input_hash,
              call.latency_ms, call.input_tokens, call.output_tokens,
+             call.cached_input_tokens,
              call.request_context, call.response_json, call.created_at,
              COALESCE(
                jsonb_agg(
@@ -762,7 +771,8 @@ async function getThoughtRunDetail(thoughtRunId) {
           SELECT call.id, call.thought_run_id, call.sequence_number, call.purpose,
                  call.profile, call.provider, call.model, call.status,
                  call.error_code, call.input_hash, call.latency_ms,
-                 call.input_tokens, call.output_tokens, call.response_json,
+                 call.input_tokens, call.output_tokens, call.cached_input_tokens,
+                 call.response_json,
                  call.created_at,
                  COALESCE(
                    jsonb_agg(

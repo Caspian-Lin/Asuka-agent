@@ -66,7 +66,11 @@ test("provider routes by explicit profile and returns audit metadata", async () 
       return new Response(JSON.stringify({
         model: "fast-model-2026",
         choices: [{ message: { content: "OK" } }],
-        usage: { prompt_tokens: 4, completion_tokens: 1 },
+        usage: {
+          prompt_tokens: 4,
+          completion_tokens: 1,
+          prompt_tokens_details: { cached_tokens: 3 },
+        },
       }), { status: 200, headers: { "Content-Type": "application/json" } });
     },
   });
@@ -78,8 +82,18 @@ test("provider routes by explicit profile and returns audit metadata", async () 
   assert.equal(calls[0].url, "https://models.example/v1/chat/completions");
   assert.equal(JSON.parse(calls[0].init.body).model, "fast-model");
   assert.deepEqual(
-    { model: response.model, inputTokens: response.inputTokens, outputTokens: response.outputTokens },
-    { model: "fast-model-2026", inputTokens: 4, outputTokens: 1 },
+    {
+      model: response.model,
+      inputTokens: response.inputTokens,
+      outputTokens: response.outputTokens,
+      cachedInputTokens: response.cachedInputTokens,
+    },
+    {
+      model: "fast-model-2026",
+      inputTokens: 4,
+      outputTokens: 1,
+      cachedInputTokens: 3,
+    },
   );
   assert.deepEqual(response.requestPayload, JSON.parse(calls[0].init.body));
 });
@@ -306,4 +320,18 @@ test("provider request payload is the exact secret-free JSON body", () => {
     max_tokens: 4_096,
   });
   assert.doesNotMatch(JSON.stringify(payload), /must-not-appear/);
+});
+
+test("tool-free compression requests explicitly disable tool selection", () => {
+  const payload = openAiCompatibleRequestPayload({
+    baseUrl: "https://models.example/v1",
+    modelId: "primary-model",
+  }, {
+    messages: [{ role: "user", content: "压缩" }],
+    tools: [],
+    toolChoice: "none",
+    maxOutputTokens: 2_048,
+  });
+  assert.equal(Object.hasOwn(payload, "tools"), false);
+  assert.equal(payload.tool_choice, "none");
 });

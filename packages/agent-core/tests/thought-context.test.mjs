@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   estimateChatTokens,
+  projectThoughtCompressionSource,
   projectThoughtContext,
   selectInitializationHistory,
   shouldUseInitializationHistory,
@@ -253,6 +254,26 @@ test("optional history is pruned before mandatory new messages", () => {
   assert.ok(result.omittedHistoryCount > 0);
 });
 
+test("a projected next turn requests compression at the configured soft-limit ratio", () => {
+  const result = projectThoughtContext({
+    systemMessages,
+    committedTurns: [{
+      thoughtRunId: "turn-1",
+      turnOrdinal: 1,
+      newMessages: [source("old", { content: "旧上下文 ".repeat(60) })],
+      primaryOutput: "继续观察。".repeat(40),
+      actionState: "no_action",
+    }],
+    newMessages: [source("new", { content: "本轮新增 ".repeat(20) })],
+    contextWindow: 1_200,
+    reservedOutputTokens: 200,
+    reservedToolResultTokens: 100,
+    compressionRatio: 0.72,
+  });
+  assert.equal(result.compressionThreshold, Math.floor(result.softLimit * 0.72));
+  assert.equal(result.chunks[0].needsCompression, true);
+});
+
 test("a single oversized required source fails without producing a skippable chunk", () => {
   assert.throws(
     () => projectThoughtContext({
@@ -264,4 +285,33 @@ test("a single oversized required source fails without producing a skippable chu
     }),
     (error) => error instanceof ThoughtContextError && error.code === "source_too_large",
   );
+});
+
+test("compression source contains the prior summary and complete committed turns only", () => {
+  const sourceProjection = projectThoughtCompressionSource({
+    compression: {
+      epochId: "epoch-1",
+      ordinal: 1,
+      output: "上一段仍在讨论露营。",
+      promptVersion: "compression-v1",
+      coversThroughThoughtRunId: "turn-1",
+    },
+    committedTurns: [{
+      thoughtRunId: "turn-2",
+      turnOrdinal: 2,
+      newMessages: [source("committed-2")],
+      primaryOutput: "继续等待天气预报。",
+      actionState: "no_action",
+    }],
+  });
+  assert.deepEqual(sourceProjection.contextItems.map((item) => item.itemType), [
+    "compression",
+    "message",
+    "thought_turn",
+  ]);
+  assert.equal(
+    sourceProjection.contextItems[0].metadata.coversThroughThoughtRunId,
+    "turn-1",
+  );
+  assert.doesNotMatch(JSON.stringify(sourceProjection.messages), /new_source/);
 });

@@ -9,7 +9,7 @@
 - `thought_tick`：每 15 分钟检查各白名单 QQ 会话 watermark 后的新消息，由 primary 模型生成自然 Markdown 思绪并进行有界只读 tool-call 循环；fast 随后把原文编译为严格 reply/memory/task/no_action proposals，必要时最多要求两次 primary revision；
 - `memory_consolidation`：每天 03:00（Asia/Shanghai）由 primary 模型生成待审的 create/update/conflict 记忆候选。
 
-每个会话拥有独立 Thought Stream、Epoch、追加式 Turn 和 watermark。accepted proposal、Turn 完成状态、watermark 与消息 thought-read 状态已原子提交，`no_action` 同样是成功结果。操作员可以关闭当前 Epoch 并开启空的新段，已提交 watermark 不回退。reply proposal 已接入服务端硬策略和 NapCat 唯一出站队列；默认总开关关闭且为 Shadow。当前没有正式记忆召回或自动上下文压缩；`recall_memories` 在 reviewed memory store 上线前明确返回空，不会把待审候选伪装成已召回记忆。
+每个会话拥有独立 Thought Stream、Epoch、追加式 Turn 和 watermark。accepted proposal、Turn 完成状态、watermark 与消息 thought-read 状态已原子提交，`no_action` 同样是成功结果。预计下一轮达到可用输入的 72% 时，worker 会先用无工具的 primary 调用压缩旧 Epoch，再原子切换到携带完整摘要的新 Epoch；本轮新增消息不会被提前吞入摘要。操作员仍可关闭当前 Epoch 并开启空的新段，已提交 watermark 不回退。reply proposal 已接入服务端硬策略和 NapCat 唯一出站队列；默认总开关关闭且为 Shadow。当前没有正式记忆召回；`recall_memories` 在 reviewed memory store 上线前明确返回空，不会把待审候选伪装成已召回记忆。
 
 ```text
 scheduler -> queued job_run -> worker lease + heartbeat
@@ -26,7 +26,7 @@ scheduler -> queued job_run -> worker lease + heartbeat
 
 ### 数据契约状态
 
-Migration `0006_glorious_rictor` 已建立 `thought_streams`、`thought_stream_epochs`、带 Stream/Epoch/Turn 顺序的 `thought_runs`，以及与实际副作用分离的 `action_proposals`。后续迁移加入 primary/compiler 检查点和 `outbound_policies / speech_decisions / outbound_deliveries`。`llm_calls.purpose` 区分 primary、工具续轮、compiler、revision 和 compression；消息使用 `author_kind`、`direction`、平台消息 ID 与 receipt 表达用户、Asuka 和平台回显。
+Migration `0006_glorious_rictor` 已建立 `thought_streams`、`thought_stream_epochs`、带 Stream/Epoch/Turn 顺序的 `thought_runs`，以及与实际副作用分离的 `action_proposals`。后续迁移加入 primary/compiler 检查点和 `outbound_policies / speech_decisions / outbound_deliveries`；`0010_brief_hulk` 为模型调用和 Epoch 增加 cache token 审计，不迁移旧思绪数据。`llm_calls.purpose` 区分 primary、工具续轮、compiler、revision 和 compression；消息使用 `author_kind`、`direction`、平台消息 ID 与 receipt 表达用户、Asuka 和平台回显。
 
 上下文 projector 已按 Stream 读取首次初始化历史并集、当前 Epoch 已提交 Turn、压缩输出和本轮新消息。它以模型配置的 `context_window` 计算预算，先裁剪可选历史/低相关记忆，再按时间将必选新消息分块；每块成功后才推进到该块末尾。每次供应商实际收到的无请求头 JSON 请求体、messages 和所引用的 context items 都写入 `llm_calls`，可由 inspector 原样重放；API Key 只存在于请求头，不进入审计载荷。当前正式 memory store 尚未实现，因此 recalled-memory 段保持为空，但顺序和预算接口已经固定。
 
@@ -88,6 +88,8 @@ soft_limit = min(configured_context_window, provider_model_limit)
              - reserved_tool_result
 compress_at = 70% ~ 75% of soft_limit
 ```
+
+当前默认 `compress_at=72%`。provider 未单独声明上限时使用模型设置中的 `context_window`；任务配置可用更小的 `providerContextWindow` 收紧真实上限，但不能放大设置值。cache 命中 token 只写入调用和 Epoch 指标，不参与恢复或正确性判断。
 
 新消息是必选输入。超出预算时依次缩减初始化历史和低相关记忆；如果仅新消息已经超限，按时间顺序分 chunk 处理，watermark 只推进到实际成功处理的最后一条。
 
@@ -161,7 +163,9 @@ fast 模型接收：主模型完整输出、可引用 message/memory/source mani
 
 重置解决“主动从头开始”，压缩解决“有损延续长期对话”，两者不能混为同一种操作。
 
-预计下一轮会超过阈值时，先创建特殊 compression call：
+预计下一轮会超过阈值时，先创建特殊 compression call。调用结果先独立持久化；只有摘要校验通过后，worker 才在一个 PostgreSQL 事务中关闭旧 Epoch、创建新 Epoch、推进 Stream ordinal 并把当前 Turn 归入新 Epoch。调用后、事务前崩溃会继续使用旧 Epoch，并在重试时复用已保存的合格摘要；事务内不会暴露半切换状态。
+
+压缩调用遵循：
 
 - 使用 primary 模型；
 - 请求中不提供 tools，并在支持时设置 `tool_choice=none`；

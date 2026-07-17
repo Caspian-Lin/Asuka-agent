@@ -8,6 +8,7 @@
     "./outbound-policy": "./src/outbound-policy.mjs",
     "./primary-thought": "./src/primary-thought.mjs",
     "./scheduled-cognition": "./src/scheduled-cognition.mjs",
+    "./thought-compression": "./src/thought-compression.mjs",
     "./thought-context": "./src/thought-context.mjs"
   },
   "scripts": {

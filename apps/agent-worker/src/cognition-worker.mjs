@@ -10,11 +10,19 @@ import {
   validateThoughtOutput,
 } from "@asuka-agent/agent-core/scheduled-cognition";
 import {
+  estimateChatTokens,
+  estimateTextTokens,
+  projectThoughtCompressionSource,
   projectThoughtContext,
   selectInitializationHistory,
   shouldUseInitializationHistory,
   ThoughtContextError,
 } from "@asuka-agent/agent-core/thought-context";
+import {
+  ThoughtCompressionError,
+  thoughtCompressionRequest,
+  validateThoughtCompressionResult,
+} from "@asuka-agent/agent-core/thought-compression";
 import {
   parsePrimaryToolCall,
   PRIMARY_THOUGHT_PROMPT_VERSION,
@@ -86,6 +94,9 @@ export function cognitionError(error) {
   if (error instanceof ThoughtContextError) {
     return { code: error.code, message: error.message, retryable: false };
   }
+  if (error instanceof ThoughtCompressionError) {
+    return { code: error.code, message: error.message, retryable: error.retryable };
+  }
   if (error instanceof ActionCompilerError) {
     return { code: error.code, message: error.message, retryable: error.retryable };
   }
@@ -113,6 +124,21 @@ export function thoughtStreamIdFor(agentId, conversationId) {
 
 export function thoughtEpochIdFor(streamId, ordinal) {
   return `thought-epoch:${stableHash({ streamId, ordinal })}`;
+}
+
+export function effectiveContextWindow(configuredContextWindow, providerContextWindow = null) {
+  const configured = Number(configuredContextWindow);
+  const provider = providerContextWindow == null
+    ? configured
+    : Number(providerContextWindow);
+  if (!Number.isSafeInteger(configured) || configured < 1_024 ||
+      !Number.isSafeInteger(provider) || provider < 1_024) {
+    throw new ThoughtContextError(
+      "budget_invalid",
+      "模型设置或 provider 上下文上限无效",
+    );
+  }
+  return Math.min(configured, provider);
 }
 
 export function committedToolTraceMessages(rows) {
@@ -609,7 +635,9 @@ export function createCognitionWorker({
     );
     const [epochRows, historyRows, committedRows] = await Promise.all([
       sql`
-        SELECT id, ordinal, compression_output, compression_prompt_version
+        SELECT id, ordinal, compression_output, compression_prompt_version,
+               covers_through_thought_run_id, input_tokens, output_tokens,
+               cached_input_tokens
         FROM thought_stream_epochs
         WHERE id = ${thoughtRun.epochId}
         LIMIT 1
@@ -714,6 +742,7 @@ export function createCognitionWorker({
     const candidates = historyRows
       .map((row) => sourceFromRow(row, conversationType))
       .reverse();
+    const epoch = epochRows[0];
     const initializationHistory = shouldUseInitializationHistory({
       epochOrdinal: epoch?.ordinal ?? 1,
       committedTurnCount: committedTurns.length,
@@ -726,20 +755,342 @@ export function createCognitionWorker({
           anchorAt: lastMessage.sent_at,
         })
       : [];
-    const epoch = epochRows[0];
     return {
+      epochId: epoch?.id ?? thoughtRun.epochId,
+      epochOrdinal: Number(epoch?.ordinal ?? 1),
       compression: epoch?.compression_output
         ? {
             epochId: epoch.id,
             ordinal: Number(epoch.ordinal),
             output: String(epoch.compression_output),
             promptVersion: epoch.compression_prompt_version,
+            coversThroughThoughtRunId: epoch.covers_through_thought_run_id,
+            inputTokens: epoch.input_tokens == null ? null : Number(epoch.input_tokens),
+            outputTokens: epoch.output_tokens == null ? null : Number(epoch.output_tokens),
+            cachedInputTokens: epoch.cached_input_tokens == null
+              ? null
+              : Number(epoch.cached_input_tokens),
           }
         : null,
       initializationHistory,
       committedTurns,
       recalledMemories: [],
     };
+  }
+
+  async function compressionCallHistory(thoughtRunId) {
+    const rows = await sql`
+      SELECT id, status, error_code, request_context, response_json,
+             input_tokens, output_tokens, cached_input_tokens, sequence_number
+      FROM llm_calls
+      WHERE thought_run_id = ${thoughtRunId}
+        AND purpose = 'compression'
+      ORDER BY sequence_number
+    `;
+    return rows.map((row) => ({
+      id: String(row.id),
+      status: String(row.status),
+      errorCode: row.error_code == null ? null : String(row.error_code),
+      requestContext: row.request_context,
+      response: row.response_json ?? {},
+      inputTokens: row.input_tokens == null ? null : Number(row.input_tokens),
+      outputTokens: row.output_tokens == null ? null : Number(row.output_tokens),
+      cachedInputTokens: row.cached_input_tokens == null
+        ? null
+        : Number(row.cached_input_tokens),
+      sequenceNumber: Number(row.sequence_number),
+    }));
+  }
+
+  async function commitCompressionEpoch({
+    run,
+    thoughtRun,
+    persistent,
+    compressionCall,
+    output,
+  }) {
+    const now = clock();
+    const sourceEpochOrdinal = Number(persistent.epochOrdinal);
+    const targetEpochOrdinal = sourceEpochOrdinal + 1;
+    const targetEpochId = thoughtEpochIdFor(thoughtRun.streamId, targetEpochOrdinal);
+    const coversThroughThoughtRunId = persistent.committedTurns.at(-1)?.thoughtRunId;
+    if (!coversThroughThoughtRunId) {
+      throw new ThoughtCompressionError(
+        "compression_source_missing",
+        "当前 Epoch 没有可作为压缩覆盖边界的 Thought Turn",
+      );
+    }
+    await sql.begin(async (tx) => {
+      const streams = await tx`
+        SELECT current_epoch_ordinal, lease_owner
+        FROM thought_streams
+        WHERE id = ${thoughtRun.streamId}
+        FOR UPDATE
+      `;
+      const stream = streams[0];
+      if (!stream || stream.lease_owner !== leaseOwner) {
+        throw new ThoughtCompressionError(
+          "stream_lease_lost",
+          "压缩提交前 Thought Stream lease 已失效",
+          true,
+        );
+      }
+      const currentOrdinal = Number(stream.current_epoch_ordinal);
+      if (currentOrdinal === sourceEpochOrdinal) {
+        await tx`
+          INSERT INTO thought_stream_epochs (
+            id, stream_id, ordinal, status, compression_output,
+            compression_prompt_version, covers_through_thought_run_id,
+            input_tokens, output_tokens, cached_input_tokens,
+            started_at, created_at
+          ) VALUES (
+            ${targetEpochId}, ${thoughtRun.streamId}, ${targetEpochOrdinal}, 'active',
+            ${output}, ${compressionCall.promptVersion}, ${coversThroughThoughtRunId},
+            ${compressionCall.inputTokens}, ${compressionCall.outputTokens},
+            ${compressionCall.cachedInputTokens}, ${now}, ${now}
+          )
+          ON CONFLICT (stream_id, ordinal) DO NOTHING
+        `;
+        const epochs = await tx`
+          SELECT id, compression_output
+          FROM thought_stream_epochs
+          WHERE stream_id = ${thoughtRun.streamId}
+            AND ordinal = ${targetEpochOrdinal}
+          LIMIT 1
+        `;
+        if (!epochs[0] || epochs[0].id !== targetEpochId ||
+            epochs[0].compression_output !== output) {
+          throw new ThoughtCompressionError(
+            "compression_epoch_conflict",
+            "目标 Epoch 已存在且压缩内容不一致",
+          );
+        }
+        const closedEpochs = await tx`
+          UPDATE thought_stream_epochs
+          SET status = 'closed', completed_at = ${now}
+          WHERE id = ${persistent.epochId}
+            AND stream_id = ${thoughtRun.streamId}
+            AND ordinal = ${sourceEpochOrdinal}
+            AND status = 'active'
+          RETURNING id
+        `;
+        if (closedEpochs.length !== 1) {
+          throw new ThoughtCompressionError(
+            "compression_source_epoch_invalid",
+            "源 Epoch 不存在或已经关闭",
+          );
+        }
+        await tx`
+          UPDATE thought_streams
+          SET current_epoch_ordinal = ${targetEpochOrdinal},
+              version = version + 1, updated_at = ${now}
+          WHERE id = ${thoughtRun.streamId}
+        `;
+      } else if (currentOrdinal === targetEpochOrdinal) {
+        const epochs = await tx`
+          SELECT id, compression_output
+          FROM thought_stream_epochs
+          WHERE stream_id = ${thoughtRun.streamId}
+            AND ordinal = ${targetEpochOrdinal}
+          LIMIT 1
+        `;
+        if (!epochs[0] || epochs[0].id !== targetEpochId ||
+            epochs[0].compression_output !== output) {
+          throw new ThoughtCompressionError(
+            "compression_epoch_conflict",
+            "恢复压缩提交时目标 Epoch 内容不一致",
+          );
+        }
+      } else {
+        throw new ThoughtCompressionError(
+          "compression_epoch_changed",
+          "压缩期间当前 Epoch 已发生变化",
+        );
+      }
+      await tx`
+        UPDATE thought_runs
+        SET epoch_id = ${targetEpochId}
+        WHERE id = ${thoughtRun.id}
+      `;
+      await tx`
+        INSERT INTO events (
+          id, conversation_id, event_type, source_type, payload_json,
+          correlation_id, created_at
+        ) VALUES (
+          ${`event:thought-compression:${targetEpochId}`}, ${thoughtRun.conversationId},
+          'thought_context_compressed', 'agent',
+          ${tx.json({
+            thoughtRunId: thoughtRun.id,
+            compressionLlmCallId: compressionCall.id,
+            sourceEpochId: persistent.epochId,
+            sourceEpochOrdinal,
+            targetEpochId,
+            targetEpochOrdinal,
+            coversThroughThoughtRunId,
+            promptVersion: compressionCall.promptVersion,
+          })}, ${run.correlation_id}, ${now}
+        )
+        ON CONFLICT (id) DO NOTHING
+      `;
+    });
+    thoughtRun.epochId = targetEpochId;
+    return {
+      epochId: targetEpochId,
+      epochOrdinal: targetEpochOrdinal,
+      compression: {
+        epochId: targetEpochId,
+        ordinal: targetEpochOrdinal,
+        output,
+        promptVersion: compressionCall.promptVersion,
+        coversThroughThoughtRunId,
+        inputTokens: compressionCall.inputTokens,
+        outputTokens: compressionCall.outputTokens,
+        cachedInputTokens: compressionCall.cachedInputTokens,
+      },
+      initializationHistory: [],
+      committedTurns: [],
+      recalledMemories: persistent.recalledMemories,
+    };
+  }
+
+  async function compressThoughtStream({
+    run,
+    thoughtRun,
+    context,
+    persistent,
+    provider,
+    configuration,
+    contextWindow,
+  }) {
+    const source = projectThoughtCompressionSource({
+      compression: persistent.compression,
+      committedTurns: persistent.committedTurns,
+    });
+    const requestedOutputTokens = Number(run.config?.compressionOutputTokens ?? 2_048);
+    const maxOutputTokens = Math.min(
+      4_096,
+      Math.max(256, Number.isSafeInteger(requestedOutputTokens)
+        ? requestedOutputTokens
+        : 2_048),
+      Math.max(256, contextWindow - 256),
+    );
+    const request = thoughtCompressionRequest({
+      sourceMessages: source.messages,
+      participants: context.participants,
+      sourceEpochOrdinal: persistent.epochOrdinal,
+      coversThroughThoughtRunId: persistent.committedTurns.at(-1)?.thoughtRunId,
+      maxOutputTokens,
+    });
+    const projectedInputTokens = estimateChatTokens(request.messages);
+    if (projectedInputTokens + maxOutputTokens > contextWindow) {
+      throw new ThoughtCompressionError(
+        "compression_input_exceeds_window",
+        "旧 Epoch 已超过可安全压缩的模型上下文上限；请重置该会话上下文",
+      );
+    }
+    const existingCalls = await compressionCallHistory(thoughtRun.id);
+    const reusable = existingCalls.find((call) => call.status === "succeeded");
+    if (reusable) {
+      const output = validateThoughtCompressionResult(reusable.response, {
+        participants: context.participants,
+      });
+      return commitCompressionEpoch({
+        run,
+        thoughtRun,
+        persistent,
+        output,
+        compressionCall: {
+          ...reusable,
+          promptVersion: request.promptVersion,
+          inputTokens: reusable.inputTokens ?? projectedInputTokens,
+          outputTokens: reusable.outputTokens ?? estimateTextTokens(output),
+        },
+      });
+    }
+    const configuredAttempts = Number(run.config?.maxCompressionAttempts ?? 2);
+    const maxAttempts = Math.min(
+      3,
+      Math.max(1, Number.isSafeInteger(configuredAttempts) ? configuredAttempts : 2),
+    );
+    let validationAttempts = existingCalls.filter((call) => (
+      call.errorCode?.startsWith("compression_")
+    )).length;
+    while (validationAttempts < maxAttempts) {
+      await heartbeat(run.id);
+      let result;
+      try {
+        result = await provider.complete(request);
+      } catch (error) {
+        await recordLlmCall({
+          run,
+          thoughtRunId: thoughtRun.id,
+          context,
+          projection: {
+            inputTokens: projectedInputTokens,
+            contextItems: source.contextItems,
+          },
+          request,
+          configuration,
+          error,
+          responseMetadata: {
+            sourceEpochId: persistent.epochId,
+            sourceEpochOrdinal: persistent.epochOrdinal,
+            coversThroughThoughtRunId: persistent.committedTurns.at(-1)?.thoughtRunId,
+            attempt: validationAttempts + 1,
+          },
+        });
+        throw error;
+      }
+      let output;
+      let validationError;
+      try {
+        output = validateThoughtCompressionResult(result, {
+          participants: context.participants,
+        });
+      } catch (error) {
+        validationError = error;
+      }
+      const callId = await recordLlmCall({
+        run,
+        thoughtRunId: thoughtRun.id,
+        context,
+        projection: {
+          inputTokens: projectedInputTokens,
+          contextItems: source.contextItems,
+        },
+        request,
+        configuration,
+        result,
+        error: validationError,
+        responseMetadata: {
+          sourceEpochId: persistent.epochId,
+          sourceEpochOrdinal: persistent.epochOrdinal,
+          coversThroughThoughtRunId: persistent.committedTurns.at(-1)?.thoughtRunId,
+          attempt: validationAttempts + 1,
+        },
+      });
+      if (validationError) {
+        validationAttempts += 1;
+        continue;
+      }
+      return commitCompressionEpoch({
+        run,
+        thoughtRun,
+        persistent,
+        output,
+        compressionCall: {
+          id: callId,
+          promptVersion: request.promptVersion,
+          inputTokens: result.inputTokens ?? projectedInputTokens,
+          outputTokens: result.outputTokens ?? estimateTextTokens(output),
+          cachedInputTokens: result.cachedInputTokens ?? null,
+        },
+      });
+    }
+    throw new ThoughtCompressionError(
+      "compression_attempts_exhausted",
+      `压缩模型连续 ${maxAttempts} 次返回不合格摘要`,
+    );
   }
 
   async function executePrimaryTool(conversationId, toolCall) {
@@ -1943,6 +2294,7 @@ export function createCognitionWorker({
           id, job_run_id, thought_run_id, conversation_id, correlation_id,
           profile, provider, model, prompt_version, input_hash, output_hash,
           status, error_code, latency_ms, input_tokens, output_tokens,
+          cached_input_tokens,
           sequence_number, purpose, request_context, response_json, created_at
         ) VALUES (
           ${callId}, ${run.id}, ${thoughtRunId},
@@ -1953,7 +2305,8 @@ export function createCognitionWorker({
           ${result ? stableHash(result.content) : null},
           ${failure ? "failed" : "succeeded"}, ${failure?.code ?? null},
           ${result?.latencyMs ?? null}, ${result?.inputTokens ?? projection?.inputTokens ?? null},
-          ${result?.outputTokens ?? null}, ${sequenceRows[0].next_sequence},
+          ${result?.outputTokens ?? null}, ${result?.cachedInputTokens ?? null},
+          ${sequenceRows[0].next_sequence},
           ${request.purpose ?? "primary"},
           ${tx.json(requestMessages)},
           ${result ? tx.json({
@@ -2206,13 +2559,34 @@ export function createCognitionWorker({
           };
         }
       }
-      const persistent = await loadProjectionContext(
+      const contextWindow = effectiveContextWindow(
+        configuration.contextWindow,
+        run.config?.providerContextWindow ?? null,
+      );
+      const configuredToolReserve = Number(run.config?.reservedToolResultTokens ?? 1_024);
+      const reservedToolResultTokens = Math.min(
+        contextWindow,
+        Math.max(0, Number.isSafeInteger(configuredToolReserve)
+          ? configuredToolReserve
+          : 1_024),
+      );
+      const configuredCompressionRatio = Number(run.config?.compressionRatio ?? 0.72);
+      const compressionRatio = configuredCompressionRatio >= 0.7 &&
+          configuredCompressionRatio <= 0.75
+        ? configuredCompressionRatio
+        : 0.72;
+      const provider = new OpenAiCompatibleProvider({
+        fetchImpl,
+        loadProfile: async () => configuration,
+        timeoutMs: 60_000,
+      });
+      let persistent = await loadProjectionContext(
         run,
         conversation,
         context,
         thoughtRun,
       );
-      const projection = projectThoughtContext({
+      const buildProjection = () => projectThoughtContext({
         systemMessages: [baseRequest.messages[0]],
         compression: persistent.compression,
         initializationHistory: persistent.initializationHistory,
@@ -2220,18 +2594,39 @@ export function createCognitionWorker({
         recalledMemories: persistent.recalledMemories,
         newMessages: context.messages,
         tools: isPrimaryThought ? PRIMARY_THOUGHT_TOOLS : [],
-        contextWindow: configuration.contextWindow,
+        contextWindow,
         reservedOutputTokens: baseRequest.maxOutputTokens,
-        reservedToolResultTokens: Math.max(
-          0,
-          Number(run.config?.reservedToolResultTokens ?? 1_024),
-        ),
+        reservedToolResultTokens,
+        compressionRatio,
       });
-      const provider = new OpenAiCompatibleProvider({
-        fetchImpl,
-        loadProfile: async () => configuration,
-        timeoutMs: 60_000,
-      });
+      let projection;
+      let projectionRequiresCompression = false;
+      try {
+        projection = buildProjection();
+      } catch (error) {
+        if (isPrimaryThought &&
+            error instanceof ThoughtContextError &&
+            error.code === "compression_required" &&
+            persistent.committedTurns.length > 0) {
+          projectionRequiresCompression = true;
+        } else {
+          throw error;
+        }
+      }
+      if (isPrimaryThought && persistent.committedTurns.length > 0 &&
+          (projectionRequiresCompression ||
+            projection.chunks.some((chunk) => chunk.needsCompression))) {
+        persistent = await compressThoughtStream({
+          run,
+          thoughtRun,
+          context,
+          persistent,
+          provider,
+          configuration,
+          contextWindow,
+        });
+        projection = buildProjection();
+      }
       const sourcePool = new Map([
         ...persistent.initializationHistory,
         ...persistent.committedTurns.flatMap((turn) => turn.newMessages),
@@ -2256,7 +2651,7 @@ export function createCognitionWorker({
           run.config?.maxPrimaryRounds ?? projection.chunks.length + 4,
         );
         const configuredTokens = Number(
-          run.config?.maxPrimaryTokens ?? configuration.contextWindow * 2,
+          run.config?.maxPrimaryTokens ?? contextWindow * 2,
         );
         const configuredToolCalls = Number(run.config?.maxPrimaryToolCalls ?? 8);
         const configuredActiveMs = Number(run.config?.maxPrimaryActiveMs ?? 120_000);
@@ -2269,9 +2664,9 @@ export function createCognitionWorker({
           ),
           maxTokens: Math.min(
             4_000_000,
-            Math.max(configuration.contextWindow, Number.isSafeInteger(configuredTokens)
+            Math.max(contextWindow, Number.isSafeInteger(configuredTokens)
               ? configuredTokens
-              : configuration.contextWindow * 2),
+              : contextWindow * 2),
           ),
           maxToolCalls: Math.min(
             30,

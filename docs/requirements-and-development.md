@@ -1,10 +1,10 @@
 # Asuka Agent：需求与开发设计文档
 
-> 文档版本：0.6.4（会话级思绪生命周期）
+> 文档版本：0.6.5（会话级思绪压缩）
 >
 > 更新时间：2026-07-17
 >
-> 状态：NapCat QQ 双向接入、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、primary 自然思绪/只读工具循环、fast 动作编译和受硬策略控制的自主外发已实现；正式记忆召回继续按依赖链实现
+> 状态：NapCat QQ 双向接入、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、Epoch 自动压缩/恢复、primary 自然思绪/只读工具循环、fast 动作编译和受硬策略控制的自主外发已实现；正式记忆召回继续按依赖链实现
 >
 > 配套实现：`Asuka Agent`
 
@@ -472,7 +472,7 @@ outbound_deliveries  平台 message id、状态、撤回信息
 agent_runs           父/子 Agent 运行树、预算、状态
 ```
 
-当前已通过 PostgreSQL migration 实现 `channels`、`inbound_deliveries`、`jobs`、`job_runs`、`llm_profile_settings`、`conversation_participants`、`job_conversation_watermarks`、`thought_streams`、`thought_stream_epochs`、`thought_runs`、`llm_calls`、`llm_call_context_items` 与 `action_proposals`；`operational_thoughts` 和 `memory_candidates` 仅保留旧 MVP 数据契约。`messages` 已包含 unread、稳定说话人、author/direction、当时显示名、回复目标和平台消息身份。所有模型调用和 proposal 必须关联 Thought Run，proposal 不等于 effect。`outbound_*`、正式记忆和子 Agent 表仍未开放。IM 会话通过正式 `channel_id` 外键归属 Channel；禁止解析拼接 ID 代替关系。模型配置以 `(agent_id, profile)` 为主键，profile 仅允许 `primary | fast`；API Key 使用服务端 `SETTINGS_ENCRYPTION_KEY` 加密，数据库只保存 AES-256-GCM envelope。
+当前已通过 PostgreSQL migration 实现 `channels`、`inbound_deliveries`、`jobs`、`job_runs`、`llm_profile_settings`、`conversation_participants`、`job_conversation_watermarks`、`thought_streams`、`thought_stream_epochs`、`thought_runs`、`llm_calls`、`llm_call_context_items` 与 `action_proposals`；`operational_thoughts` 和 `memory_candidates` 仅保留旧 MVP 数据契约。`thought_stream_epochs` 保存压缩覆盖边界、完整输出、prompt version、输入/输出/cache token；内部测试数据不做旧思绪回填。`messages` 已包含 unread、稳定说话人、author/direction、当时显示名、回复目标和平台消息身份。所有模型调用和 proposal 必须关联 Thought Run，proposal 不等于 effect。`outbound_*`、正式记忆和子 Agent 表仍未开放。IM 会话通过正式 `channel_id` 外键归属 Channel；禁止解析拼接 ID 代替关系。模型配置以 `(agent_id, profile)` 为主键，profile 仅允许 `primary | fast`；API Key 使用服务端 `SETTINGS_ENCRYPTION_KEY` 加密，数据库只保存 AES-256-GCM envelope。
 
 ## 9. API 设计
 

@@ -144,7 +144,13 @@ function compressionEntry(compression) {
       title: `Epoch ${compression.ordinal} compression`,
       content: String(compression.output),
       section: "compression",
-      metadata: { promptVersion: compression.promptVersion ?? null },
+      metadata: {
+        promptVersion: compression.promptVersion ?? null,
+        coversThroughThoughtRunId: compression.coversThroughThoughtRunId ?? null,
+        inputTokens: compression.inputTokens ?? null,
+        outputTokens: compression.outputTokens ?? null,
+        cachedInputTokens: compression.cachedInputTokens ?? null,
+      },
     }),
   };
 }
@@ -203,6 +209,28 @@ function turnEntries(turn) {
     });
   }
   return entries;
+}
+
+export function projectThoughtCompressionSource({
+  compression = null,
+  committedTurns = [],
+}) {
+  const previousCompression = compressionEntry(compression);
+  const entries = [
+    ...(previousCompression ? [previousCompression] : []),
+    ...committedTurns.flatMap(turnEntries),
+  ];
+  if (!committedTurns.length) {
+    throw new ThoughtContextError(
+      "compression_source_missing",
+      "当前 Epoch 没有可压缩的已提交 Thought Turn",
+    );
+  }
+  return {
+    messages: entries.map((entry) => entry.message),
+    contextItems: entries.map((entry) => entry.item),
+    inputTokens: estimateChatTokens(entries.map((entry) => entry.message)),
+  };
 }
 
 function memoryEntry(memory) {
