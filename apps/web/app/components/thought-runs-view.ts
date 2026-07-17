@@ -398,3 +398,242 @@ export function thoughtCallStageLabel(call: ThoughtCallStageInput) {
   if (call.purpose === "compression") return "压缩上下文";
   return call.purpose;
 }
+
+export type ThoughtSurfaceState = "loading" | "error" | "empty" | "ready";
+
+export function thoughtRunsSurfaceState({
+  loading,
+  error,
+  runCount,
+}: {
+  loading: boolean;
+  error: string | null;
+  runCount: number;
+}): ThoughtSurfaceState {
+  if (loading && runCount === 0) return "loading";
+  if (error && runCount === 0) return "error";
+  return runCount === 0 ? "empty" : "ready";
+}
+
+export function thoughtDetailSurfaceState({
+  selectedId,
+  detailId,
+  loading,
+  error,
+}: {
+  selectedId: string | null;
+  detailId: string | null;
+  loading: boolean;
+  error: string | null;
+}): ThoughtSurfaceState {
+  if (!selectedId) return "empty";
+  if (loading || detailId !== selectedId) return error ? "error" : "loading";
+  return error ? "error" : "ready";
+}
+
+export type ThoughtTimelineCall = ThoughtCallStageInput & {
+  id: string;
+  sequence_number: number;
+  created_at: string;
+  profile: string;
+  model?: string | null;
+  latency_ms?: number | null;
+};
+
+export type ThoughtTimelineEntry = {
+  id: string;
+  sequence: number;
+  purpose: string;
+  label: string;
+  statusLabel: string;
+  tone: "current" | "failure" | "persisted" | "execution";
+  profile: string;
+  model: string | null;
+  createdAt: string;
+  latencyMs: number | null;
+};
+
+function compilerResponseStatus(call: ThoughtTimelineCall) {
+  const content = call.response_json?.content;
+  if (typeof content !== "string") return null;
+  try {
+    const parsed = JSON.parse(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
+    return typeof parsed?.status === "string" ? parsed.status : null;
+  } catch {
+    return null;
+  }
+}
+
+export function buildThoughtTimeline(
+  calls: ThoughtTimelineCall[],
+  invalidCallIds: string[] = [],
+): ThoughtTimelineEntry[] {
+  const invalid = new Set(invalidCallIds);
+  return [...calls].sort((left, right) => left.sequence_number - right.sequence_number)
+    .map((call) => {
+      const failed = call.status === "failed" || Boolean(call.error_code) || invalid.has(call.id);
+      const compilerStatus = call.purpose === "compiler" ? compilerResponseStatus(call) : null;
+      const running = call.status === "running";
+      return {
+        id: call.id,
+        sequence: call.sequence_number,
+        purpose: call.purpose,
+        label: thoughtCallStageLabel(call),
+        statusLabel: failed
+          ? invalid.has(call.id) ? "校验失败" : "失败"
+          : compilerStatus === "needs_revision" ? "要求修订"
+            : running ? "运行中" : "成功",
+        tone: failed ? "failure"
+          : compilerStatus === "needs_revision" || running ? "current"
+            : call.purpose === "compiler" ? "execution" : "persisted",
+        profile: call.profile,
+        model: call.model ?? null,
+        createdAt: call.created_at,
+        latencyMs: call.latency_ms ?? null,
+      };
+    });
+}
+
+export function thoughtOutcome({
+  runStatus,
+  compilerStatus,
+  proposals,
+  lastValidationError,
+}: {
+  runStatus: string;
+  compilerStatus: string | null;
+  proposals: Array<{ proposal_type: string }>;
+  lastValidationError?: { code?: string; message?: string } | null;
+}) {
+  if (proposals.some((proposal) => proposal.proposal_type === "no_action")) {
+    return {
+      label: "已完成 · no_action",
+      detail: "本轮明确选择不产生副作用，Turn 与 watermark 仍可正常提交。",
+      tone: "persisted" as const,
+    };
+  }
+  if (compilerStatus === "needs_revision") {
+    return {
+      label: "等待 Primary 修订",
+      detail: "Compiler 发现动作所需信息不足，正在执行有界修订。",
+      tone: "current" as const,
+    };
+  }
+  if (compilerStatus === "retrying") {
+    return {
+      label: "Compiler 校验失败",
+      detail: lastValidationError?.message ?? "无效编译结果不会进入 Proposal，系统将从 Compiler 阶段重试。",
+      tone: "failure" as const,
+    };
+  }
+  if (runStatus === "failed") {
+    return {
+      label: "Thought 运行失败",
+      detail: lastValidationError?.message ?? "本轮没有形成可提交的最终结果。",
+      tone: "failure" as const,
+    };
+  }
+  if (proposals.length > 0) {
+    return {
+      label: `已形成 ${proposals.length} 个 Proposal`,
+      detail: "Proposal 只是候选动作；是否产生副作用由后续 Policy 与 Executor 决定。",
+      tone: "execution" as const,
+    };
+  }
+  if (runStatus === "completed") {
+    return {
+      label: "已完成 · 无 Proposal",
+      detail: "本轮已完成，但没有保存动作候选。",
+      tone: "persisted" as const,
+    };
+  }
+  return {
+    label: "Thought 正在运行",
+    detail: "阶段状态会随持久化检查点更新。",
+    tone: "current" as const,
+  };
+}
+
+export function proposalPrimaryMatch(primaryOutput: string | null, proposalContent: unknown) {
+  if (typeof proposalContent !== "string" || !proposalContent) return null;
+  const start = primaryOutput?.indexOf(proposalContent) ?? -1;
+  return {
+    matches: start >= 0,
+    start,
+    end: start >= 0 ? start + proposalContent.length : -1,
+  };
+}
+
+export type ProposalEvidenceReference = { type: string; id: string };
+
+export type ProposalEvidenceSource = ProposalEvidenceReference & {
+  title: string;
+  content: string | null;
+  origin: "context" | "tool_result" | "unresolved";
+  redacted: boolean;
+};
+
+function toolResultEvidence(
+  item: ThoughtContextItem,
+  reference: ProposalEvidenceReference,
+): ProposalEvidenceSource | null {
+  if (!item.content) return null;
+  try {
+    const payload = JSON.parse(item.content);
+    const values = reference.type === "message" ? payload?.messages : payload?.memories;
+    if (!Array.isArray(values)) return null;
+    const source = values.find((value) => String(
+      reference.type === "message"
+        ? value?.message_id ?? value?.id
+        : value?.memory_id ?? value?.id,
+    ) === reference.id);
+    if (!source) return null;
+    return {
+      ...reference,
+      title: reference.type === "message"
+        ? String(source.sender_display_name ?? source.sender_id ?? "消息证据")
+        : String(source.title ?? `记忆 ${reference.id}`),
+      content: String(source.content ?? source.claim ?? "") || null,
+      origin: "tool_result",
+      redacted: Boolean(source.redacted),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function resolveProposalEvidence(
+  references: ProposalEvidenceReference[],
+  calls: Array<{ context_items: ThoughtContextItem[] }>,
+): ProposalEvidenceSource[] {
+  const items = calls.flatMap((call) => call.context_items);
+  return references.map((reference) => {
+    const direct = items.find((item) => {
+      if (item.referenceId !== reference.id) return false;
+      if (reference.type === "source") {
+        return ["external_source", "tool_result"].includes(item.itemType);
+      }
+      return item.itemType === reference.type;
+    });
+    if (direct) {
+      return {
+        ...reference,
+        title: direct.title,
+        content: direct.content,
+        origin: "context" as const,
+        redacted: direct.metadata?.redacted === true,
+      };
+    }
+    for (const item of items.filter((candidate) => candidate.itemType === "tool_result")) {
+      const resolved = toolResultEvidence(item, reference);
+      if (resolved) return resolved;
+    }
+    return {
+      ...reference,
+      title: `${reference.type}:${reference.id}`,
+      content: null,
+      origin: "unresolved" as const,
+      redacted: false,
+    };
+  });
+}

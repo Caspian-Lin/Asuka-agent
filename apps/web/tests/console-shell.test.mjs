@@ -31,10 +31,20 @@ test("collapsed navigation uses compact elements instead of compressing long lab
 });
 
 test("thought inspector exposes compression coverage, cache usage, and raw calls", async () => {
-  const source = await readFile(thoughtRunsPath, "utf8");
+  const [source, css] = await Promise.all([
+    readFile(thoughtRunsPath, "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
   assert.match(source, /上下文压缩/);
   assert.match(source, /covers_through_thought_run_id/);
   assert.match(source, /compression_cached_input_tokens/);
   assert.match(source, /无可调用工具/);
   assert.match(source, /RawCallPayload/);
+  assert.match(source, /ThoughtStageTimeline/);
+  assert.match(source, /CompressionInheritance/);
+  assert.match(source, /Proposal、策略与实际 Effect/);
+  assert.match(source, /Stream Watermark/);
+  assert.match(source, /Trace 权限/);
+  assert.match(css, /@media \(max-width: 700px\)[\s\S]*?\.thought-stage-timeline > li/);
+  assert.match(css, /@media \(max-width: 700px\)[\s\S]*?\.compression-covered-runs button/);
 });

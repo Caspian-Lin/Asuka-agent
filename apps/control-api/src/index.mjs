@@ -13,6 +13,11 @@ import {
   createThoughtStreamService,
   ThoughtStreamRequestError,
 } from "./thought-stream-service.mjs";
+import {
+  createThoughtTraceService,
+  resolveThoughtTraceAccess,
+  ThoughtTraceRequestError,
+} from "./thought-trace-service.mjs";
 
 const host = process.env.CONTROL_API_HOST ?? "127.0.0.1";
 const port = positiveInteger(process.env, "CONTROL_API_PORT", 3002);
@@ -683,17 +688,22 @@ async function listThoughtRuns() {
            thought.trigger_reason, thought.status, thought.decision,
            thought.summary, thought.started_at, thought.completed_at,
            thought.created_at, job.job_type, thought.turn_ordinal,
+           thought.new_message_start_at, thought.new_message_start_id,
+           thought.new_message_end_at, thought.new_message_end_id,
            epoch.ordinal AS context_epoch_ordinal,
            stream.status AS stream_status,
            stream.current_epoch_ordinal,
-           stream.committed_message_at, stream.updated_at AS stream_updated_at,
+           stream.committed_message_at, stream.committed_message_id,
+           stream.updated_at AS stream_updated_at,
            COALESCE(call_stats.call_count, 0)::int AS call_count,
            COALESCE(call_stats.input_tokens, 0)::int AS input_tokens,
            COALESCE(call_stats.output_tokens, 0)::int AS output_tokens,
            COALESCE(call_stats.cached_input_tokens, 0)::int AS cached_input_tokens,
            COALESCE(call_stats.latency_ms, 0)::int AS latency_ms,
            COALESCE(output_stats.thought_count, 0)::int AS thought_count,
-           COALESCE(output_stats.candidate_count, 0)::int AS candidate_count
+           COALESCE(output_stats.candidate_count, 0)::int AS candidate_count,
+           COALESCE(output_stats.contains_sensitive_content, false)
+             AS contains_sensitive_content
     FROM thought_runs thought
     JOIN conversations conversation ON conversation.id = thought.conversation_id
     JOIN thought_streams stream ON stream.id = thought.stream_id
@@ -714,7 +724,16 @@ async function listThoughtRuns() {
         (SELECT count(*) FROM operational_thoughts output
          WHERE output.thought_run_id = thought.id) AS thought_count,
         (SELECT count(*) FROM memory_candidates candidate
-         WHERE candidate.thought_run_id = thought.id) AS candidate_count
+         WHERE candidate.thought_run_id = thought.id) AS candidate_count,
+        EXISTS (
+          SELECT 1 FROM memory_candidates candidate
+          WHERE candidate.thought_run_id = thought.id
+            AND candidate.sensitivity IN ('sensitive', 'restricted')
+        ) OR EXISTS (
+          SELECT 1 FROM action_proposals proposal
+          WHERE proposal.thought_run_id = thought.id
+            AND proposal.payload->>'sensitivity' IN ('sensitive', 'restricted')
+        ) AS contains_sensitive_content
     ) output_stats ON true
     WHERE thought.agent_id = 'agent-asuka'
     ORDER BY thought.created_at DESC
@@ -737,7 +756,8 @@ async function getThoughtRunDetail(thoughtRunId) {
            epoch.cached_input_tokens AS compression_cached_input_tokens,
            stream.status AS stream_status,
            stream.current_epoch_ordinal,
-           stream.committed_message_at, stream.updated_at AS stream_updated_at
+           stream.committed_message_at, stream.committed_message_id,
+           stream.updated_at AS stream_updated_at
     FROM thought_runs thought
     JOIN conversations conversation ON conversation.id = thought.conversation_id
     JOIN thought_streams stream ON stream.id = thought.stream_id
@@ -747,7 +767,7 @@ async function getThoughtRunDetail(thoughtRunId) {
     WHERE thought.id = ${thoughtRunId} AND thought.agent_id = 'agent-asuka'
     LIMIT 1
   `;
-  if (!runs[0]) throw new RequestError("thought_run_not_found", "思绪运行不存在", 404);
+  if (!runs[0]) return null;
   const [calls, outputs, candidates, proposals, participants, retrievals] = await Promise.all([
     sql`
       SELECT call.id, call.sequence_number, call.purpose, call.profile, call.provider,
@@ -884,6 +904,20 @@ async function getThoughtRunDetail(thoughtRunId) {
     ...run,
     calls: contextCallRows.filter((call) => call.thought_run_id === run.id),
   }));
+  const coveredRuns = runs[0].covers_through_thought_run_id
+    ? await sql`
+        SELECT covered.id, covered.turn_ordinal, covered.status, covered.summary,
+               covered.started_at, covered.completed_at,
+               covered_epoch.ordinal AS context_epoch_ordinal
+        FROM thought_runs AS covered
+        JOIN thought_runs AS boundary
+          ON boundary.id = ${runs[0].covers_through_thought_run_id}
+        JOIN thought_stream_epochs AS covered_epoch ON covered_epoch.id = covered.epoch_id
+        WHERE covered.stream_id = ${runs[0].stream_id}
+          AND covered.turn_ordinal <= boundary.turn_ordinal
+        ORDER BY covered.turn_ordinal
+      `
+    : [];
   return {
     run: runs[0],
     calls,
@@ -893,6 +927,7 @@ async function getThoughtRunDetail(thoughtRunId) {
     participants,
     retrievals,
     contextRuns,
+    coveredRuns,
   };
 }
 
@@ -923,6 +958,17 @@ async function listMemoryCandidates() {
     LIMIT 200
   `;
 }
+
+const thoughtTrace = createThoughtTraceService({
+  repository: {
+    listRuns: listThoughtRuns,
+    getRun: getThoughtRunDetail,
+  },
+  access: resolveThoughtTraceAccess({
+    configuredAccess: process.env.CONTROL_API_THOUGHT_TRACE_ACCESS,
+    host,
+  }),
+});
 
 const server = http.createServer(async (request, response) => {
   const origin = allowedOrigin(request.headers.origin);
@@ -1013,7 +1059,7 @@ const server = http.createServer(async (request, response) => {
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/thought-runs") {
-      sendJson(response, 200, { thoughtRuns: await listThoughtRuns() }, origin);
+      sendJson(response, 200, await thoughtTrace.listRuns(), origin);
       return;
     }
     const thoughtStreamResetRoute = url.pathname.match(
@@ -1037,7 +1083,7 @@ const server = http.createServer(async (request, response) => {
       sendJson(
         response,
         200,
-        await getThoughtRunDetail(decodeURIComponent(thoughtRunRoute[1])),
+        await thoughtTrace.getRun(decodeURIComponent(thoughtRunRoute[1])),
         origin,
       );
       return;
@@ -1145,7 +1191,8 @@ const server = http.createServer(async (request, response) => {
       error instanceof RequestError ||
       error instanceof JobRequestError ||
       error instanceof OutboundRequestError ||
-      error instanceof ThoughtStreamRequestError;
+      error instanceof ThoughtStreamRequestError ||
+      error instanceof ThoughtTraceRequestError;
     console.error("control API request failed", {
       code: expected ? error.code : "internal_error",
       message: expected ? error.message : "unexpected request failure",

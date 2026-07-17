@@ -1,10 +1,10 @@
 # Asuka Agent：需求与开发设计文档
 
-> 文档版本：0.6.7（可配置认知调度与定向手动运行）
+> 文档版本：0.6.8（Thought Stream 决策链与脱敏 Trace）
 >
-> 更新时间：2026-07-17
+> 更新时间：2026-07-18
 >
-> 状态：NapCat QQ 双向接入、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、Epoch 自动压缩/恢复、primary/fast 分层、自主外发、Agent 全局记忆提案/披露召回，以及可配置认知调度与定向会话手动运行已实现；正式审核激活状态机与混合检索继续按依赖链实现
+> 状态：NapCat QQ 双向接入、IM Channel、双档 LLM、Thought Stream、会话隔离上下文、Epoch 自动压缩/恢复、primary/fast 分层、自主外发、Agent 全局记忆提案/披露召回、可配置认知调度、定向会话手动运行，以及 Proposal → Policy → Effect 脱敏 Trace 已实现；正式审核激活状态机与混合检索继续按依赖链实现
 >
 > 配套实现：`Asuka Agent`
 
@@ -193,6 +193,9 @@ flowchart TD
 - 支持一轮或多轮 LLM 调用，每轮保存实际上下文、模型输出、延迟和 token；
 - message、memory、tool、external source 都以结构化 context item 引用；
 - 控制台按会话组织 Thought Run，并明确区分 system、历史消息/思绪、本轮未读与工具调用；
+- Stream 列表显示活动 Epoch 和已提交 watermark；Turn 详情显示新增消息边界、实际调用阶段、compression 继承关系，以及可展开但默认不重复 trace 的覆盖 Turn；
+- Proposal 必须能反查 Primary 连续原文和 message/memory/source evidence，并与服务端 Policy 结果及 Executor Effect 分段展示；
+- Thought Trace API 默认脱敏 `sensitive/restricted` 内容并始终清除 secret-shaped 字段；只有控制 API 绑定 loopback 且本地显式设置 `CONTROL_API_THOUGHT_TRACE_ACCESS=full` 时才返回敏感原文；
 - 允许操作员重置单个会话的短期上下文；重置开启空 epoch，但不删除审计记录、不回退已消费消息 watermark；
 - Thought 成功消费消息时同时推进 Stream watermark 与消息已读状态，IM 页面展示独立的待思绪读取数；
 - 普通查看不提供数据标注；未来标注台必须独立实现。

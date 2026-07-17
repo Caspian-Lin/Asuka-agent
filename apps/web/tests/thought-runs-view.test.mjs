@@ -3,16 +3,39 @@ import test from "node:test";
 
 import {
   buildThoughtContextOutline,
+  buildThoughtTimeline,
   callRetryIndex,
   collectContextSections,
   collectPrimarySystemInstructions,
   describeSystemInstruction,
   describeToolArguments,
   groupThoughtRuns,
+  proposalPrimaryMatch,
   recordedRequestPayload,
+  resolveProposalEvidence,
+  thoughtDetailSurfaceState,
   thoughtCallStageLabel,
+  thoughtOutcome,
+  thoughtRunsSurfaceState,
   toolDescription,
 } from "../app/components/thought-runs-view.ts";
+
+test("thought list and detail expose loading, empty, error, and ready states", () => {
+  assert.equal(thoughtRunsSurfaceState({ loading: true, error: null, runCount: 0 }), "loading");
+  assert.equal(thoughtRunsSurfaceState({ loading: false, error: null, runCount: 0 }), "empty");
+  assert.equal(thoughtRunsSurfaceState({ loading: false, error: "offline", runCount: 0 }), "error");
+  assert.equal(thoughtRunsSurfaceState({ loading: false, error: null, runCount: 2 }), "ready");
+
+  assert.equal(thoughtDetailSurfaceState({
+    selectedId: "thought-1", detailId: null, loading: true, error: null,
+  }), "loading");
+  assert.equal(thoughtDetailSurfaceState({
+    selectedId: "thought-1", detailId: null, loading: false, error: "missing",
+  }), "error");
+  assert.equal(thoughtDetailSurfaceState({
+    selectedId: "thought-1", detailId: "thought-1", loading: false, error: null,
+  }), "ready");
+});
 
 test("thought runs stay grouped by conversation in latest-seen order", () => {
   const groups = groupThoughtRuns([
@@ -138,6 +161,54 @@ test("current run calls describe their stage instead of labeling every output as
     status: "failed",
     error_code: "timeout",
   }), "主模型调用失败");
+});
+
+test("timeline keeps compression, primary, tool, compiler, and revision in persisted order", () => {
+  const calls = [
+    { id: "compiler", sequence_number: 4, purpose: "compiler", profile: "fast", created_at: "2026-07-17T00:00:04Z", status: "succeeded", response_json: { content: "{\"status\":\"needs_revision\"}" } },
+    { id: "compression", sequence_number: 1, purpose: "compression", profile: "primary", created_at: "2026-07-17T00:00:01Z", status: "succeeded" },
+    { id: "primary", sequence_number: 2, purpose: "primary", profile: "primary", created_at: "2026-07-17T00:00:02Z", status: "succeeded" },
+    { id: "tool", sequence_number: 3, purpose: "tool_continuation", profile: "primary", created_at: "2026-07-17T00:00:03Z", status: "succeeded" },
+    { id: "revision", sequence_number: 5, purpose: "revision", profile: "primary", created_at: "2026-07-17T00:00:05Z", status: "failed", error_code: "timeout" },
+  ];
+  const timeline = buildThoughtTimeline(calls, []);
+  assert.deepEqual(timeline.map((entry) => entry.purpose), [
+    "compression", "primary", "tool_continuation", "compiler", "revision",
+  ]);
+  assert.equal(timeline[3].statusLabel, "要求修订");
+  assert.equal(timeline[4].statusLabel, "失败");
+});
+
+test("no_action is a successful visible outcome distinct from compiler failure", () => {
+  assert.equal(thoughtOutcome({
+    runStatus: "completed",
+    compilerStatus: "accepted",
+    proposals: [{ proposal_type: "no_action" }],
+  }).label, "已完成 · no_action");
+  assert.equal(thoughtOutcome({
+    runStatus: "primary_completed",
+    compilerStatus: "retrying",
+    proposals: [],
+    lastValidationError: { message: "JSON 无效" },
+  }).detail, "JSON 无效");
+});
+
+test("proposal provenance verifies exact primary text and resolves direct or tool evidence", () => {
+  assert.deepEqual(proposalPrimaryMatch("我想回复：收到，我们继续。", "收到，我们继续。"), {
+    matches: true,
+    start: 5,
+    end: 13,
+  });
+  const evidence = resolveProposalEvidence([
+    { type: "message", id: "message-1" },
+    { type: "memory", id: "memory-1" },
+    { type: "source", id: "missing" },
+  ], [{ context_items: [
+    { id: "direct", itemType: "message", referenceId: "message-1", title: "小林", content: "继续吧", metadata: { section: "new_source" } },
+    { id: "tool", itemType: "tool_result", referenceId: "tool-call-1", title: "召回结果", content: JSON.stringify({ memories: [{ memory_id: "memory-1", title: "露营", content: "周六露营" }] }), metadata: {} },
+  ] }]);
+  assert.deepEqual(evidence.map((item) => item.origin), ["context", "tool_result", "unresolved"]);
+  assert.equal(evidence[1].content, "周六露营");
 });
 
 test("audit outline groups original messages under their persisted Thought turn", () => {

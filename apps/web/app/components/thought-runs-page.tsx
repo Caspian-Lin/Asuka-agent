@@ -16,14 +16,20 @@ import {
 import { controlRequest } from "./control-api";
 import {
   buildThoughtContextOutline,
+  buildThoughtTimeline,
   callRetryIndex,
   collectPrimarySystemInstructions,
   describeSystemInstruction,
   describeToolArguments,
   groupThoughtRuns,
   isPrimaryAgentPurpose,
+  proposalPrimaryMatch,
   recordedRequestPayload,
+  resolveProposalEvidence,
+  thoughtDetailSurfaceState,
   thoughtCallStageLabel,
+  thoughtOutcome,
+  thoughtRunsSurfaceState,
   toolDescription,
   toolLabel,
   type ThoughtContextItem,
@@ -47,11 +53,14 @@ type ThoughtRun = {
   job_type: string;
   turn_ordinal: number;
   context_epoch_ordinal: number;
+  new_message_start_at: string | null;
   new_message_start_id: string | null;
+  new_message_end_at: string | null;
   new_message_end_id: string | null;
   stream_status: string;
   current_epoch_ordinal: number;
   committed_message_at: string | null;
+  committed_message_id: string | null;
   stream_updated_at: string;
   call_count: number;
   input_tokens: number;
@@ -60,6 +69,7 @@ type ThoughtRun = {
   latency_ms: number;
   thought_count: number;
   candidate_count: number;
+  contains_sensitive_content: boolean;
 };
 
 type ToolCall = {
@@ -181,6 +191,20 @@ type ThoughtDetail = {
     aliases: string[];
   }>;
   contextRuns: ContextRun[];
+  coveredRuns: Array<{
+    id: string;
+    turn_ordinal: number;
+    status: string;
+    summary: string | null;
+    started_at: string;
+    completed_at: string | null;
+    context_epoch_ordinal: number;
+  }>;
+  traceAccess: {
+    scope: string;
+    sensitiveContent: "full" | "redacted";
+    secrets: string;
+  };
 };
 
 type ToolResultRecord = {
@@ -446,7 +470,10 @@ function PrimaryCallNode({
           />
         ))}
         {call.response_json?.content?.trim() && (
-          <section className="audit-model-output">
+          <section
+            className="audit-model-output"
+            id={isFinalOutput ? "thought-primary-output" : undefined}
+          >
             <header>
               <strong>模型本次输出</strong>
               <AuditBadge tone={entersContext ? "persisted" : "execution"}>
@@ -618,17 +645,214 @@ function PersistedTurnNode({
   );
 }
 
-function proposalResultCopy(proposal: ActionProposal) {
-  if (proposal.delivery_status === "sent") {
-    return `已发送${proposal.external_message_id ? ` · 平台消息 ${proposal.external_message_id}` : ""}`;
+function shortId(value?: string | null) {
+  if (!value) return "—";
+  return value.length > 12 ? `${value.slice(0, 8)}…` : value;
+}
+
+function policyOutcomeLabel(value?: string | null) {
+  if (value === "speak") return "允许发送";
+  if (value === "shadow_speak") return "Shadow：仅记录建议发送";
+  if (value === "blocked") return "策略阻止";
+  if (value === "deferred") return "延后评估";
+  if (value === "silent") return "保持安静";
+  return value ?? "尚未评估";
+}
+
+function deliveryStatusLabel(value?: string | null) {
+  if (value === "sent") return "已发送";
+  if (value === "pending") return "等待发送";
+  if (value === "sending") return "正在发送";
+  if (value === "failed") return "发送失败";
+  if (value === "failed_uncertain") return "发送结果不确定";
+  return value ?? "未创建 Effect";
+}
+
+function ProposalTrace({
+  proposal,
+  finalPrimaryOutput,
+  calls,
+}: {
+  proposal: ActionProposal;
+  finalPrimaryOutput: string | null;
+  calls: LlmCall[];
+}) {
+  const content = typeof proposal.payload?.content === "string"
+    ? proposal.payload.content
+    : "";
+  const match = proposalPrimaryMatch(finalPrimaryOutput, content);
+  const references = proposal.evidence_references.flatMap((reference) => {
+    const type = typeof reference?.type === "string" ? reference.type : null;
+    const id = typeof reference?.id === "string" ? reference.id : null;
+    return type && id ? [{ type, id }] : [];
+  });
+  const evidence = resolveProposalEvidence(references, calls);
+  const hasDecision = Boolean(proposal.decision_id);
+  const hasDelivery = Boolean(proposal.delivery_id);
+  const noAction = proposal.proposal_type === "no_action";
+  return (
+    <article className="audit-action" key={proposal.id}>
+      <header>
+        <strong>动作 {proposal.ordinal + 1} · {actionLabel(proposal.proposal_type)}</strong>
+        <AuditBadge tone="execution">{proposal.status}</AuditBadge>
+      </header>
+      <ol className="proposal-decision-chain" aria-label="Proposal、策略与实际 Effect">
+        <li>
+          <span className="proposal-step-number">1</span>
+          <div>
+            <header><strong>Proposal</strong><small>模型候选，不等于已执行</small></header>
+            {content ? <p>{content}</p> : <p className="audit-empty">显式 no_action，不包含动作内容。</p>}
+            <div className="proposal-provenance">
+              {match && (
+                <a className={match.matches ? "verified" : "mismatch"} href="#thought-primary-output">
+                  {match.matches ? "查看 Primary 连续原文" : "Primary 中未找到连续原文"}
+                </a>
+              )}
+              <span>{references.length} 条证据引用</span>
+            </div>
+            {evidence.length > 0 && (
+              <details className="proposal-evidence" open>
+                <summary>查看证据</summary>
+                <div>
+                  {evidence.map((source) => (
+                    <article key={`${source.type}:${source.id}`}>
+                      <header>
+                        <strong>{source.title}</strong>
+                        <code>{source.type}:{shortId(source.id)}</code>
+                      </header>
+                      <p>{source.content || (
+                        source.origin === "unresolved"
+                          ? "引用已保存，但当前 Trace 未解析出原始内容。"
+                          : "（空内容）"
+                      )}</p>
+                      {source.redacted && <small>该内容已按本地 Trace 权限脱敏。</small>}
+                    </article>
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
+        </li>
+        <li>
+          <span className="proposal-step-number">2</span>
+          <div>
+            <header><strong>Policy</strong><small>服务端确定性决策</small></header>
+            <p>{hasDecision
+              ? `${policyOutcomeLabel(proposal.decision_outcome)} · ${proposal.decision_reason_code ?? "无原因码"}`
+              : noAction
+                ? "no_action 不需要授权副作用。"
+                : "尚未记录对应的策略决策。"}</p>
+            {proposal.next_evaluation_at && (
+              <small>下次评估：{formatDateTime(proposal.next_evaluation_at)}</small>
+            )}
+            {proposal.policy_reasons.length > 0 && (
+              <pre>{JSON.stringify(proposal.policy_reasons, null, 2)}</pre>
+            )}
+          </div>
+        </li>
+        <li>
+          <span className="proposal-step-number">3</span>
+          <div>
+            <header><strong>Effect</strong><small>Executor 的真实副作用</small></header>
+            <p>{hasDelivery
+              ? `${deliveryStatusLabel(proposal.delivery_status)}${proposal.external_message_id
+                ? ` · 平台消息 ${proposal.external_message_id}` : ""}`
+              : noAction
+                ? "无副作用，这是本轮的预期结果。"
+                : "没有创建可执行的外部 Effect。"}</p>
+            {proposal.last_error_code && <small>{proposal.last_error_code}</small>}
+            {proposal.last_error_message && <small>{proposal.last_error_message}</small>}
+          </div>
+        </li>
+      </ol>
+    </article>
+  );
+}
+
+function ThoughtStageTimeline({
+  calls,
+  invalidCallIds,
+}: {
+  calls: LlmCall[];
+  invalidCallIds: string[];
+}) {
+  const entries = buildThoughtTimeline(calls, invalidCallIds);
+  return (
+    <details className="audit-panel audit-timeline-panel" open>
+      <summary>
+        <span className="audit-panel-title"><LuListTree aria-hidden /><strong>运行阶段时间线</strong></span>
+        <AuditBadge tone="fixed">{entries.length} 次持久化调用</AuditBadge>
+      </summary>
+      <div className="audit-panel-body">
+        {entries.length ? (
+          <ol className="thought-stage-timeline">
+            {entries.map((entry) => (
+              <li key={entry.id} className={`tone-${entry.tone}`}>
+                <span className="timeline-sequence">{entry.sequence}</span>
+                <div>
+                  <strong>{entry.label}</strong>
+                  <small>
+                    {entry.profile}{entry.model ? ` · ${entry.model}` : ""}
+                    {` · ${formatDateTime(entry.createdAt)} · ${entry.latencyMs ?? 0} ms`}
+                  </small>
+                </div>
+                <AuditBadge tone={entry.tone}>{entry.statusLabel}</AuditBadge>
+              </li>
+            ))}
+          </ol>
+        ) : <p className="audit-empty">本轮尚未保存模型调用。</p>}
+      </div>
+    </details>
+  );
+}
+
+function CompressionInheritance({
+  detail,
+  onOpenRun,
+}: {
+  detail: ThoughtDetail;
+  onOpenRun: (runId: string) => void;
+}) {
+  if (!detail.run.compression_prompt_version) {
+    if (detail.run.context_epoch_ordinal <= 1) return null;
+    return (
+      <div className="context-epoch-note">
+        <LuRefreshCw aria-hidden />
+        <div><strong>Epoch {detail.run.context_epoch_ordinal} 从空上下文开始</strong><p>这是操作员重置产生的上下文段，没有继承压缩摘要。</p></div>
+      </div>
+    );
   }
-  if (proposal.delivery_status) {
-    return `发送状态：${proposal.delivery_status}${proposal.last_error_code ? ` · ${proposal.last_error_code}` : ""}`;
-  }
-  if (proposal.decision_outcome) {
-    return `策略结果：${proposal.decision_outcome} · ${proposal.decision_reason_code ?? "无原因码"}`;
-  }
-  return `Proposal 状态：${proposal.status}`;
+  return (
+    <details className="audit-panel audit-compression-inheritance" open>
+      <summary>
+        <span className="audit-panel-title"><LuRefreshCw aria-hidden /><strong>继承的 Compression Epoch</strong></span>
+        <AuditBadge tone="persisted">Epoch {detail.run.context_epoch_ordinal}</AuditBadge>
+      </summary>
+      <div className="audit-panel-body">
+        <p className="audit-empty">
+          当前 Turn 位于 Epoch {detail.run.context_epoch_ordinal}，继承由 Epoch {detail.run.context_epoch_ordinal - 1} 压缩生成的完整摘要。
+        </p>
+        <dl className="thought-facts">
+          <div><dt>压缩版本</dt><dd>{detail.run.compression_prompt_version}</dd></div>
+          <div><dt>覆盖截止</dt><dd>Thought #{shortId(detail.run.covers_through_thought_run_id)}</dd></div>
+          <div><dt>压缩 token</dt><dd>{detail.run.compression_input_tokens ?? 0} 输入 / {detail.run.compression_output_tokens ?? 0} 输出</dd></div>
+          <div><dt>cache 命中</dt><dd>{detail.run.compression_cached_input_tokens ?? 0} tokens</dd></div>
+        </dl>
+        <details className="compression-covered-runs">
+          <summary>展开被摘要覆盖的 {detail.coveredRuns.length} 个旧 Turn</summary>
+          <div>
+            {detail.coveredRuns.map((run) => (
+              <button key={run.id} onClick={() => onOpenRun(run.id)}>
+                <span><strong>第 {run.turn_ordinal} 次 Thought</strong><small>Epoch {run.context_epoch_ordinal} · {formatDateTime(run.started_at)}</small></span>
+                <span>{run.summary ?? "运行未产生摘要"}</span>
+                <LuChevronRight aria-hidden />
+              </button>
+            ))}
+          </div>
+        </details>
+      </div>
+    </details>
+  );
 }
 
 function CompilerCallNode({
@@ -636,12 +860,14 @@ function CompilerCallNode({
   ordinal,
   proposals,
   finalPrimaryOutput,
+  calls,
   invalid,
 }: {
   call: LlmCall;
   ordinal: number;
   proposals: ActionProposal[];
   finalPrimaryOutput: string | null;
+  calls: LlmCall[];
   invalid: boolean;
 }) {
   const instructions = call.request_context.filter((message) => message.role === "system");
@@ -723,15 +949,12 @@ function CompilerCallNode({
               </div>
             )}
             {proposals.length > 0 ? proposals.map((proposal) => (
-              <article className="audit-action" key={proposal.id}>
-                <header>
-                  <strong>动作 {proposal.ordinal + 1} · {actionLabel(proposal.proposal_type)}</strong>
-                  <AuditBadge tone="execution">{proposal.status}</AuditBadge>
-                </header>
-                {typeof proposal.payload?.content === "string" && <p>{proposal.payload.content}</p>}
-                <small>{proposalResultCopy(proposal)}</small>
-                {proposal.last_error_message && <small>{proposal.last_error_message}</small>}
-              </article>
+              <ProposalTrace
+                key={proposal.id}
+                proposal={proposal}
+                finalPrimaryOutput={finalPrimaryOutput}
+                calls={calls}
+              />
             )) : (
               <p className="audit-empty">
                 {parsedStatus === "accepted" ? "解析成功，没有动作候选。" : "本次解析没有生成已提交的动作。"}
@@ -753,7 +976,9 @@ export default function ThoughtRunsPage({
   const [selectedId, setSelectedId] = useState<string | null>(requestedRunId ?? null);
   const [detail, setDetail] = useState<ThoughtDetail | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [resettingConversationId, setResettingConversationId] = useState<string | null>(null);
   const [inspectorFullscreen, setInspectorFullscreen] = useState(false);
@@ -767,20 +992,23 @@ export default function ThoughtRunsPage({
           ? current
           : payload.thoughtRuns[0]?.id ?? null
       ));
-      setError(null);
+      setListError(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "思绪运行载入失败");
+      setListError(reason instanceof Error ? reason.message : "思绪运行载入失败");
     } finally {
       setLoading(false);
     }
   }, []);
 
   const loadDetail = useCallback(async (id: string) => {
+    setDetailLoading(true);
+    setDetailError(null);
     try {
       setDetail(await controlRequest<ThoughtDetail>(`/api/thought-runs/${encodeURIComponent(id)}`));
-      setError(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "思绪详情载入失败");
+      setDetailError(reason instanceof Error ? reason.message : "思绪详情载入失败");
+    } finally {
+      setDetailLoading(false);
     }
   }, []);
 
@@ -829,6 +1057,7 @@ export default function ThoughtRunsPage({
     if (!confirmed) return;
     setResettingConversationId(conversationId);
     setNotice(null);
+    setListError(null);
     try {
       const payload = await controlRequest<{
         stream: { currentEpochOrdinal: number };
@@ -841,7 +1070,7 @@ export default function ThoughtRunsPage({
       await loadRuns();
       if (selectedId) await loadDetail(selectedId);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "思绪上下文重置失败");
+      setListError(reason instanceof Error ? reason.message : "思绪上下文重置失败");
     } finally {
       setResettingConversationId(null);
     }
@@ -893,6 +1122,23 @@ export default function ThoughtRunsPage({
   const contextRunsById = useMemo(() => new Map(
     (detail?.contextRuns ?? []).map((run) => [run.id, run]),
   ), [detail]);
+  const listSurface = thoughtRunsSurfaceState({
+    loading,
+    error: listError,
+    runCount: runs.length,
+  });
+  const detailSurface = thoughtDetailSurfaceState({
+    selectedId,
+    detailId: detail?.run.id ?? null,
+    loading: detailLoading,
+    error: detailError,
+  });
+  const outcome = detail ? thoughtOutcome({
+    runStatus: detail.run.status,
+    compilerStatus: detail.run.compiler_status,
+    proposals: detail.proposals,
+    lastValidationError: detail.run.compiler_state?.lastValidationError,
+  }) : null;
 
   return (
     <section className="page-panel thought-runs-page">
@@ -902,10 +1148,19 @@ export default function ThoughtRunsPage({
       </div>
 
       {notice && <div className="inline-success" role="status">{notice}</div>}
-      {error && <div className="inline-error">{error} <button onClick={() => void loadRuns()}>重试</button></div>}
-      {loading ? (
+      {listError && runs.length > 0 && (
+        <div className="inline-error" role="alert">{listError} <button onClick={() => void loadRuns()}>重试</button></div>
+      )}
+      {listSurface === "loading" ? (
         <div className="jobs-skeleton" aria-label="正在载入思绪"><i /><i /><i /></div>
-      ) : runs.length === 0 ? (
+      ) : listSurface === "error" ? (
+        <div className="empty-state" role="alert">
+          <LuBrainCircuit className="empty-icon" aria-hidden />
+          <h3>思绪列表载入失败</h3>
+          <p>{listError}</p>
+          <button className="secondary-button" onClick={() => void loadRuns()}>重新载入</button>
+        </div>
+      ) : listSurface === "empty" ? (
         <div className="empty-state"><LuBrainCircuit className="empty-icon" aria-hidden /><h3>还没有真实思绪运行</h3><p>定时任务处理到新的 QQ 消息后，会在对应会话下留下模型轮次、上下文与引用记录。</p></div>
       ) : (
         <div className="thought-workspace">
@@ -917,7 +1172,12 @@ export default function ThoughtRunsPage({
                   <header>
                     <div>
                       <strong>{group.conversationTitle}</strong>
-                      <span>上下文第 {latest.current_epoch_ordinal} 段 · {group.runs.length} 次运行</span>
+                      <span>活动 Epoch {latest.current_epoch_ordinal} · {group.runs.length} 次运行</span>
+                      <span className="stream-watermark">
+                        {latest.committed_message_id
+                          ? `Watermark ${formatDateTime(latest.committed_message_at)} · #${shortId(latest.committed_message_id)}`
+                          : "Watermark 尚未提交"}
+                      </span>
                     </div>
                     <button
                       className="context-reset-icon"
@@ -964,8 +1224,17 @@ export default function ThoughtRunsPage({
             aria-live="polite"
             aria-label={inspectorFullscreen ? "全屏思绪详情" : "思绪详情"}
           >
-            {!detail || detail.run.id !== selectedId ? (
+            {detailSurface === "loading" ? (
               <div className="run-loading"><i /><i /><i /></div>
+            ) : detailSurface === "error" ? (
+              <div className="inspector-error" role="alert">
+                <LuBrainCircuit aria-hidden />
+                <h3>思绪详情载入失败</h3>
+                <p>{detailError}</p>
+                {selectedId && <button onClick={() => void loadDetail(selectedId)}>重新载入详情</button>}
+              </div>
+            ) : !detail ? (
+              <div className="inspector-error"><p>请选择一条 Thought 查看详情。</p></div>
             ) : (
               <>
                 <header>
@@ -973,9 +1242,7 @@ export default function ThoughtRunsPage({
                     <span>{detail.run.conversation_title} · {triggerLabel(detail.run.trigger_type)}</span>
                     <h2>
                       <LuCircle className={`run-dot state-${detail.run.status}`} aria-hidden />
-                      {detail.run.status === "completed"
-                        ? "Thought 已成功生成"
-                        : detail.run.status === "running" ? "Thought 正在生成" : "Thought 生成失败"}
+                      {outcome?.label ?? stateLabel(detail.run.status)}
                       <small>· 会话第 {detail.run.turn_ordinal} 次 · 上下文第 {detail.run.context_epoch_ordinal} 段</small>
                     </h2>
                   </div>
@@ -1010,11 +1277,12 @@ export default function ThoughtRunsPage({
                     <details className="audit-panel audit-stats-panel" open>
                       <summary>
                         <span className="audit-panel-title"><LuBrainCircuit aria-hidden /><strong>思绪统计状态</strong></span>
-                        <AuditBadge tone={detail.run.status === "completed" ? "persisted" : "failure"}>
-                          {stateLabel(detail.run.status)}
+                        <AuditBadge tone={outcome?.tone ?? "execution"}>
+                          {outcome?.label ?? stateLabel(detail.run.status)}
                         </AuditBadge>
                       </summary>
                       <div className="audit-panel-body">
+                        {outcome && <p className={`thought-outcome tone-${outcome.tone}`}>{outcome.detail}</p>}
                         <dl className="thought-facts">
                           <div><dt>思绪上下文段</dt><dd>第 {detail.run.context_epoch_ordinal} 段</dd></div>
                           <div><dt>会话内 Thought</dt><dd>第 {detail.run.turn_ordinal} 次</dd></div>
@@ -1025,8 +1293,22 @@ export default function ThoughtRunsPage({
                           <div><dt>开始时间</dt><dd>{formatDateTime(detail.run.started_at)}</dd></div>
                           <div><dt>结束时间</dt><dd>{formatDateTime(detail.run.completed_at)}</dd></div>
                           <div><dt>任务尝试</dt><dd>{detail.run.job_attempt_count} / {detail.run.job_max_attempts}</dd></div>
-                          <div><dt>新增消息</dt><dd>{contextOutline.currentMessages.length} 条</dd></div>
+                          <div><dt>新增消息范围</dt><dd>
+                            {detail.run.new_message_start_id && detail.run.new_message_end_id
+                              ? `${formatDateTime(detail.run.new_message_start_at)} #${shortId(detail.run.new_message_start_id)} → ${formatDateTime(detail.run.new_message_end_at)} #${shortId(detail.run.new_message_end_id)}`
+                              : `${contextOutline.currentMessages.length} 条 · 未保存边界`}
+                          </dd></div>
+                          <div><dt>Stream Watermark</dt><dd>
+                            {detail.run.committed_message_id
+                              ? `${formatDateTime(detail.run.committed_message_at)} · #${shortId(detail.run.committed_message_id)}`
+                              : "尚未提交"}
+                          </dd></div>
                           <div><dt>最终决策</dt><dd>{detail.run.decision ?? "没有动作"}</dd></div>
+                          <div><dt>Trace 权限</dt><dd>
+                            {detail.traceAccess.sensitiveContent === "full"
+                              ? "本地操作员 · 敏感内容可见"
+                              : "本地操作员 · 敏感内容已脱敏"}
+                          </dd></div>
                           <div><dt>上下文状态</dt><dd>
                             {detail.run.context_epoch_status === "closed"
                               ? "已关闭历史段" : "当前活动段"}
@@ -1050,6 +1332,13 @@ export default function ThoughtRunsPage({
                         </dl>
                       </div>
                     </details>
+
+                    <ThoughtStageTimeline
+                      calls={detail.calls}
+                      invalidCallIds={detail.run.compiler_state?.invalidCallIds ?? []}
+                    />
+
+                    <CompressionInheritance detail={detail} onOpenRun={setSelectedId} />
 
                     {compressionCalls.length > 0 && (
                       <details className="audit-panel audit-primary-panel" open>
@@ -1209,7 +1498,7 @@ export default function ThoughtRunsPage({
                                 <span>被动记忆召回</span>
                                 <span className="audit-summary-badges">
                                   <AuditBadge tone="current">本次输入</AuditBadge>
-                                  {!contextOutline.recalledMemories.length && <AuditBadge tone="fixed">尚未实现</AuditBadge>}
+                                  {!contextOutline.recalledMemories.length && <AuditBadge tone="fixed">无匹配结果</AuditBadge>}
                                 </span>
                               </summary>
                               <div className="audit-subnode-body">
@@ -1217,7 +1506,7 @@ export default function ThoughtRunsPage({
                                   <article className="audit-memory" key={item.id}>
                                     <strong>{item.title}</strong><p>{item.content}</p>
                                   </article>
-                                )) : <p className="audit-empty">本次没有被动召回记忆；审核记忆库仍未接入运行时。</p>}
+                                )) : <p className="audit-empty">本次没有符合 active、披露权限和相关性阈值的被动召回记忆。</p>}
                               </div>
                             </details>
 
@@ -1233,7 +1522,11 @@ export default function ThoughtRunsPage({
                               ))}
                             </div>
                             {persistedPrimaryOutput && !persistedOutputCallId && (
-                              <details className="audit-subnode audit-persisted-output" open>
+                              <details
+                                className="audit-subnode audit-persisted-output"
+                                id="thought-primary-output"
+                                open
+                              >
                                 <summary>
                                   <span>合并后的本次 Thought</span>
                                   <AuditBadge tone="persisted">进入后续上下文</AuditBadge>
@@ -1261,6 +1554,7 @@ export default function ThoughtRunsPage({
                               proposal.compiler_llm_call_id === call.id
                             ))}
                             finalPrimaryOutput={persistedPrimaryOutput}
+                            calls={detail.calls}
                             invalid={detail.run.compiler_state?.invalidCallIds?.includes(call.id) ?? false}
                           />
                         )) : <p className="audit-empty">本次尚未执行 fast compiler。</p>}
